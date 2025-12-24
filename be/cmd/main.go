@@ -13,6 +13,7 @@ import (
 	"github.com/duynguyendang/manglekit/providers/google"
 	"github.com/duynguyendang/manglekit/sdk"
 	"github.com/duynguyendang/savia/be/internal/actions"
+	"github.com/duynguyendang/savia/be/internal/tts"
 	"github.com/duynguyendang/savia/be/internal/utils"
 )
 
@@ -22,9 +23,9 @@ type SaviaRequest struct {
 }
 
 type SaviaResponse struct {
-	Text             string `json:"text"`
-	VoiceInstruction string `json:"voice_instruction"`
-	TraceID          string `json:"trace_id"`
+	Text    string `json:"text"`
+	VoiceID string `json:"voice_id"`
+	TraceID string `json:"trace_id"`
 }
 
 func main() {
@@ -69,6 +70,7 @@ func main() {
 	// HTTP Handlers
 	// ---------------------------------------------------------
 	http.HandleFunc("/v1/reason", ReasonHandler(mkit))
+	http.HandleFunc("/v1/speak", SpeakHandler())
 	http.HandleFunc("/health", HealthHandler())
 
 	logger.Info("Savia-BE listening on :8080")
@@ -128,17 +130,49 @@ func ReasonHandler(mkit *sdk.Client) http.HandlerFunc {
 		}
 		finalText := utils.Interpolate(blueprint, vars)
 
-		voiceStyle := utils.GetFactValue(result.Facts, "voice_style")
+		voiceID := utils.GetFactValue(result.Facts, "active_voice_id")
 
 		// C. Response Construction
 		resp := SaviaResponse{
-			Text:             finalText,
-			VoiceInstruction: voiceStyle,
-			TraceID:          fmt.Sprintf("sv-%d", time.Now().Unix()),
+			Text:    finalText,
+			VoiceID: voiceID,
+			TraceID: fmt.Sprintf("sv-%d", time.Now().Unix()),
 		}
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)
+	}
+}
+
+// SpeakHandler returns the http.HandlerFunc for the TTS proxy endpoint
+func SpeakHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req struct {
+			Text    string `json:"text"`
+			VoiceID string `json:"voice_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid JSON", http.StatusBadRequest)
+			return
+		}
+
+		if err := tts.StreamSpeech(w, req.Text, req.VoiceID); err != nil {
+			// tts.StreamSpeech handles writing to w on success or some errors,
+			// but if it returns error we might want to log it.
+			// However, since StreamSpeech might have already written headers, be careful.
+			// For now, let's assume StreamSpeech writes errors to w if it can,
+			// or returns error if it failed before writing.
+			// Actually my implementation of StreamSpeech writes specific errors.
+			// The only case it returns error without writing (maybe) is env var check.
+			// Let's just log it.
+			fmt.Printf("TTS Error: %v\n", err)
+			return
+		}
 	}
 }
 

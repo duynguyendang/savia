@@ -47,5 +47,17 @@ prompt_var("data", D) :- bq_result(D).
 prompt_var("history", H) :- chat_history(H).
 
 % --- 5. VOICE STEERING ---
-voice_style("stable") :- search_strategy("structured_sql").
-voice_style("expressive") :- search_strategy("vector_semantic").
+% --- 5. VOICE STEERING ---
+
+% Voice Registry
+voice_data("analytical", "21m00Tcm4TlvDq8ikWAM"). % Rachel
+voice_data("empathetic", "AZnzlk1XvdvUeBnXmlld"). % Domi
+
+% Voice Style Mapping (from Search Strategy)
+voice_style("analytical") :- search_strategy("structured_sql").
+voice_style("empathetic") :- search_strategy("vector_semantic").
+
+% Select Voice ID based on style
+active_voice_id(ID) :- 
+    voice_style(Style), 
+    voice_data(Style, ID).

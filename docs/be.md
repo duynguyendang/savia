@@ -1,12 +1,14 @@
 # Savia-BE: Neuro-Symbolic Backend LLD
 
 ## 1. System Overview
-**Savia-BE** is a Neuro-Symbolic orchestration service running on **Google Cloud Run**. It decouples logic from code by using **Manglekit** as the governance kernel. 
 
-* **Architecture Pattern:** Host-Kernel (Go Host, Manglekit Kernel).
-* **Intelligence Model:** Gemini 1.5 Flash (Low latency, cost-effective).
-* **Knowledge Source:** BigQuery (SQL for ground truth, Vector Search for semantics).
-* **Orchestration Strategy:** Logic-driven Prompt Synthesis (Blueprints defined in Datalog).
+**Savia-BE** is a high-security Neuro-Symbolic orchestration service. It utilizes **Manglekit** as its governance kernel to ensure every AI response is audited against formal logic and grounded in **BigQuery** truth.
+
+### Key Architectural Shifts:
+
+* **Secure Audio Proxy:** The ElevenLabs API Key is managed server-side via GCP Secret Manager. The backend acts as a streaming proxy, preventing sensitive credentials from leaking to the frontend.
+* **Logic-Driven Voice Selection:** Datalog rules determine not only *what* to say but *how* to say it (Voice ID, stability, style).
+* **Streaming Delivery:** Uses chunked transfer encoding to minimize perceived latency for voice output.
 
 ---
 
@@ -15,312 +17,146 @@
 ```text
 be/
 ├── cmd/
-│   └── main.go                  # Service entrypoint, Action Registry, HTTP Handler
+│   └── main.go                  # Entrypoint, Action Registry, and Proxy Handlers
 ├── internal/
+│   ├── tts/
+│   │   └── elevenlabs.ts        # Secure Streaming Proxy for ElevenLabs
 │   └── utils/
-│       └── interpolation.go     # String replacement utility for Prompt Synthesis
+│       └── interpolation.go     # String template engine
 ├── resources/
-│   ├── policies.dl              # Security, RBAC, and Compliance Gates
-│   └── rules.dl                 # SQL Registry, Search Routing, Prompt Blueprints
-├── go.mod                       # Dependencies
-└── Dockerfile                   # Cloud Run deployment config
+│   ├── policies.dl              # Security, RBAC, and Compliance
+│   └── rules.dl                 # SQL Registry, Prompt Blueprints, and Voice Mapping
+├── go.mod
+└── Dockerfile
 
 ```
 
 ---
 
-## 3. The Governance Loop (Execution Flow)
+## 3. Component Specifications
 
-Every request to `/v1/reason` undergoes a strict 4-phase lifecycle managed by Manglekit:
+### 3.1. Secure Audio Proxy (`internal/tts/elevenlabs.go`)
 
-1. **Assess (Context Loading):**
-* Host triggers `assess_context` action.
-* Loads RBAC & Chat History from BigQuery.
-* **Gate:** Policies check `halt/1`. If violated, execution stops immediately.
-
-
-2. **Execute (Tool Use):**
-* Kernel determines `search_strategy` (SQL vs. Vector).
-* Kernel retrieves `query_sql` template.
-* Host triggers `bq_executor` action using the ID and SQL provided by the Kernel.
-
-
-3. **Synthesize (Prompt Assembly):**
-* Kernel selects `active_template` (Blueprint).
-* Kernel computes `prompt_var` (Contextual variables).
-* Host performs string interpolation to create the final Prompt.
-
-
-4. **Reflect (Delivery):**
-* Host calls Gemini Flash with the synthesized prompt.
-* Host packages the result with `voice_style` for the Frontend.
-
-
-
----
-
-## 4. Component Specifications
-
-### 4.1. Host Implementation: `cmd/main.go`
-
-Responsible for I/O, registering actions, and executing the synthesis logic.
+This component handles the secure connection to ElevenLabs and pipes the binary stream back to the client.
 
 ```go
-package main
+package tts
 
 import (
-	"context"
+	"bytes"
 	"encoding/json"
 	"fmt"
-	"log"
+	"io"
 	"net/http"
 	"os"
-	"time"
-
-	"[cloud.google.com/go/bigquery](https://cloud.google.com/go/bigquery)"
-	"[github.com/duynguyendang/manglekit/adapters/func](https://github.com/duynguyendang/manglekit/adapters/func)"
-	"[github.com/duynguyendang/manglekit/sdk](https://github.com/duynguyendang/manglekit/sdk)"
-	"savia-be/internal/utils" // Local utils package
 )
 
-type SaviaRequest struct {
-	UserID  string `json:"user_id"`
-	Message string `json:"message"`
-}
+func StreamSpeech(w http.ResponseWriter, text, voiceID string) error {
+	apiKey := os.Getenv("ELEVENLABS_API_KEY") // Injected via Secret Manager
+	url := fmt.Sprintf("https://api.elevenlabs.io/v1/text-to-speech/%s/stream", voiceID)
 
-type SaviaResponse struct {
-	Text             string `json:"text"`
-	VoiceInstruction string `json:"voice_instruction"`
-	TraceID          string `json:"trace_id"`
-}
-
-func main() {
-	ctx := context.Background()
-	projectID := os.Getenv("GOOGLE_CLOUD_PROJECT")
-	apiKey := os.Getenv("GOOGLE_API_KEY")
-
-	// 1. Init BigQuery
-	bqClient, err := bigquery.NewClient(ctx, projectID)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer bqClient.Close()
-
-	// 2. Init Manglekit Kernel with Gemini Flash
-	mkit, err := sdk.NewClient(ctx,
-		sdk.WithBlueprint("./resources/policies.dl"),
-		sdk.WithBlueprint("./resources/rules.dl"),
-		sdk.WithGemini(apiKey, "gemini-1.5-flash"),
-	)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	// ---------------------------------------------------------
-	// ACTION 1: Assess Context (RBAC & History)
-	// ---------------------------------------------------------
-	mkit.RegisterAction("assess_context", function.New("assess_context", func(ctx context.Context, input map[string]interface{}) (map[string]interface{}, error) {
-		// userId := input["user_id"].(string)
-		// TODO: Implement actual BQ query to fetch Role and Last 3 Messages
-		// Mock return for LLD:
-		return map[string]interface{}{
-			"role":         "manager",
-			"tenure_years": 5,
-			"history":      []string{"User: Hi", "Savia: Hello!"},
-		}, nil
-	}))
-
-	// ---------------------------------------------------------
-	// ACTION 2: Smart BQ Executor (SQL & Vector)
-	// ---------------------------------------------------------
-	mkit.RegisterAction("bq_executor", funcCtx context.Context, input map[string]interface{}) (map[string]interface{}, error) {
-		queryID := input["query_id"].(string)
-		
-		// CRITICAL: Retrieve SQL Template defined in Datalog (rules.dl)
-		// This prevents Hard-coded SQL in Go.
-		sqlTemplate := mkit.GetFact(fmt.Sprintf("query_sql.%s", queryID))
-		if sqlTemplate == "" {
-			return nil, fmt.Errorf("unknown query_id: %s", queryID)
-		}
-
-		q := bqClient.Query(sqlTemplate)
-		q.Parameters = []bigquery.QueryParameter{
-			{Name: "user_id", Value: input["user_id"]},
-			{Name: "query_text", Value: input["query_text"]}, // For Vector Search
-		}
-		
-		// TODO: Execute Iterator and return Map
-		// Mock return:
-		return map[string]interface{}{
-			"balance":  50000000,
-			"currency": "VND",
-			"status":   "active",
-		}, nil
-	}))
-
-	// ---------------------------------------------------------
-	// HTTP Handler
-	// ---------------------------------------------------------
-	http.HandleFunc("/v1/reason", func(w http.ResponseWriter, r *http.Request) {
-		var req SaviaRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid JSON", http.StatusBadRequest)
-			return
-		}
-
-		// A. Execute Manglekit Loop
-		result, err := mkit.ExecuteByName(r.Context(), "savia_agent", map[string]interface{}{
-			"user_id": req.UserID,
-			"message": req.Message,
-		})
-
-		if err != nil {
-			// Halt/1 triggered
-			http.Error(w, fmt.Sprintf("Policy Block: %v", err), http.StatusForbidden)
-			return
-		}
-
-		// B. Prompt Synthesis (The "Fancy" Logic)
-		// Extract Blueprint ID and Facts
-		templateID := result.GetFact("active_template")
-		blueprint := result.GetFact(fmt.Sprintf("prompt_blueprint.%s", templateID))
-		
-		// Perform Interpolation (Replace {{vars}} in blueprint)
-		finalText := utils.Interpolate(blueprint, result.Facts)
-
-		// C. Response Construction
-		resp := SaviaResponse{
-			Text:             finalText,
-			VoiceInstruction: result.GetFact("voice_style"),
-			TraceID:          fmt.Sprintf("sv-%d", time.Now().Unix()),
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+	payload, _ := json.Marshal(map[string]interface{}{
+		"text":     text,
+		"model_id": "eleven_turbo_v2", // Optimized for low latency
+		"voice_settings": map[string]float64{
+			"stability":        0.5,
+			"similarity_boost": 0.8,
+		},
 	})
 
-	log.Println("Savia-BE listening on :8080")
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	req, _ := http.NewRequest("POST", url, bytes.NewBuffer(payload))
+	req.Header.Set("xi-api-key", apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil || resp.StatusCode != 200 {
+		return fmt.Errorf("TTS upstream error")
+	}
+	defer resp.Body.Close()
+
+	w.Header().Set("Content-Type", "audio/mpeg")
+	_, err = io.Copy(w, resp.Body) // Direct streaming to frontend
+	return err
 }
 
 ```
 
-### 4.2. Logic Kernel: `resources/rules.dl`
+### 3.2. Main Orchestrator (`cmd/main.go`)
 
-This file acts as the **Registry** for SQL, Blueprints, and Routing Logic. It empowers the Coding Agent to change behavior without recompiling Go.
-
-```prolog
-% ===========================================================
-% SAVIA KNOWLEDGE REGISTRY & ROUTING
-% ===========================================================
-
-% --- 1. SEARCH STRATEGY ROUTING ---
-% Structured SQL for precise data
-search_strategy("structured_sql") :- intent("check_balance") ; intent("transaction_history").
-% Semantic Vector Search for knowledge/policy
-search_strategy("vector_semantic") :- intent("policy_inquiry") ; intent("unknown").
-
-
-% --- 2. SQL TEMPLATE REGISTRY (Source of Truth) ---
-% Query ID mapping for Go Host to consume
-query_sql("get_balance", "SELECT balance, currency FROM `savia.finance.accounts` WHERE user_id = @user_id").
-
-query_sql("vector_search", "SELECT text_content FROM VECTOR_SEARCH(TABLE `savia.knowledge.policies`, 'embedding_col', (SELECT ml_generate_embedding_result FROM ML.GENERATE_EMBEDDING(MODEL `savia.models.embed`, (SELECT @query_text AS content))), top_k => 2)").
-
-
-% --- 3. PROMPT BLUEPRINT REGISTRY ---
-% Defines how Gemini Flash should behave
-prompt_blueprint("standard_data", "
-    System: You are Savia. Vibe: {{vibe}}.
-    Context: The user asked about {{intent}}.
-    Truth Data: {{data}}.
-    History: {{history}}.
-    Instruction: Answer concisely using the Truth Data.
-").
-
-prompt_blueprint("missing_data", "
-    System: You are Savia. Vibe: Empathetic.
-    Instruction: Politely inform the user that data for {{intent}} is not available. Suggest checking 'Balance'.
-").
-
-
-% --- 4. SYNTHESIS LOGIC (Variable Mapping) ---
-% Select active template
-active_template("standard_data") :- bq_result(D), NOT is_empty(D).
-active_template("missing_data")  :- bq_result(D), is_empty(D).
-
-% Compute Variables for Interpolation
-prompt_var("vibe", "Warm and Professional") :- user_tenure_years(_, Y), Y > 3.
-prompt_var("vibe", "Efficient and Direct")  :- user_tenure_years(_, Y), Y <= 3.
-prompt_var("data", D) :- bq_result(D).
-prompt_var("history", H) :- chat_history(H).
-
-% --- 5. VOICE STEERING ---
-voice_style("stable") :- search_strategy("structured_sql").
-voice_style("expressive") :- search_strategy("vector_semantic").
-
-```
-
-### 4.3. Security Policy: `resources/policies.dl`
-
-```prolog
-% ===========================================================
-% SAVIA SECURITY GATES
-% ===========================================================
-
-% Halt execution if user lacks role for the intent
-halt("SECURITY VIOLATION: Access Denied") :-
-    intent(I),
-    required_role(I, Role),
-    NOT has_role(_, Role).
-
-% Define Role Requirements
-required_role("check_balance", "customer").
-required_role("admin_settings", "admin").
-
-```
-
-### 4.4. Utility: `internal/utils/interpolation.go`
+The host that bridges the Manglekit Kernel with external services.
 
 ```go
-package utils
+// ... imports ...
 
-import (
-	"fmt"
-	"strings"
-)
+func main() {
+	// 1. Init Manglekit Client
+	mkit, _ := sdk.NewClient(ctx, 
+		sdk.WithBlueprint("./resources/policies.dl"),
+		sdk.WithBlueprint("./resources/rules.dl"),
+	)
 
-// Interpolate replaces {{key}} in the template with values from the facts map.
-func Interpolate(template string, facts map[string]interface{}) string {
-	result := template
-	for key, value := range facts {
-		placeholder := fmt.Sprintf("{{%s}}", key)
-		valStr := fmt.Sprintf("%v", value)
-		result = strings.ReplaceAll(result, placeholder, valStr)
-	}
-	return result
+	// 2. Reasoning Endpoint: Determines the Logic & Response Text
+	http.HandleFunc("/v1/reason", func(w http.ResponseWriter, r *http.Request) {
+		// ... (Execute Manglekit actions) ...
+		result, _ := mkit.ExecuteByName(ctx, "savia_agent", payload)
+		
+		// Return Text and the Voice ID determined by Datalog
+		json.NewEncoder(w).Encode(map[string]string{
+			"text":     result.GetFact("response_text"),
+			"voice_id": result.GetFact("active_voice_id"),
+			"trace_id": result.Metadata["trace_id"],
+		})
+	})
+
+	// 3. Voice Proxy Endpoint: Securely generates audio
+	http.HandleFunc("/v1/speak", func(w http.ResponseWriter, r *http.Request) {
+		var req struct { Text string; VoiceID string }
+		json.NewDecoder(r.Body).Decode(&req)
+		
+		tts.StreamSpeech(w, req.Text, req.VoiceID)
+	})
+
+	http.ListenAndServe(":8080", nil)
 }
 
 ```
 
----
+### 3.3. Intelligence Layer (`resources/rules.dl`)
 
-## 5. Data Contract (BigQuery)
+Defines the mapping between personas and ElevenLabs Voice IDs.
 
-The system relies on these specific table schemas:
+```prolog
+% ===========================================================
+% VOICE SELECTION LOGIC
+% ===========================================================
 
-1. **`savia.finance.accounts`**: `user_id (STRING), balance (NUMERIC), currency (STRING)`
-2. **`savia.security.rbac`**: `user_id (STRING), role (STRING), tenure_years (INT)`
-3. **`savia.knowledge.policies`**: `content (STRING), embedding_col (VECTOR<768>)`
+% Voice Registry
+voice_data("analytical", "21m00Tcm4TlvDq8ikWAM"). % Rachel
+voice_data("empathetic", "AZnzlk1XvdvUeBnXmlld"). % Domi
 
----
+% Select Voice ID based on the vibe determined in synthesis
+active_voice_id(ID) :- 
+    voice_style(Style), 
+    voice_data(Style, ID).
 
-## 6. Implementation Notes for Coding Agent
-
-* **Dependency Injection:** Ensure `GOOGLE_APPLICATION_CREDENTIALS` is handled implicitly by Cloud Run or explicitly in local dev.
-* **Fact Flattening:** When `bq_executor` returns a Map, the Manglekit SDK automatically flattens it into Datalog facts (e.g., `balance` becomes `bq_result({"balance": ...})`).
-* **Error Mapping:** Map Manglekit `halt` errors to HTTP 403. Map BQ/Gemini errors to HTTP 500.
+% Force analytical voice for financial data
+voice_style("analytical") :- intent("check_balance").
 
 ```
 
-```
+---
+
+## 4. Deployment & Security Strategy
+
+### Secret Management
+
+The `ELEVENLABS_API_KEY` must **never** be stored in `.env` files within the repository.
+
+1. **Store:** Use Google Cloud Secret Manager.
+2. **Access:** Grant the Cloud Run service account the `Secret Manager Secret Accessor` role.
+3. **Injection:** Map the secret to an environment variable in the Cloud Run service configuration.
+
+### Latency Optimization
+
+* Use `eleven_turbo_v2` model in the TTS proxy.
+* The frontend should use `HTMLAudioElement` or `Web Audio API` to play the binary stream immediately as chunks arrive.
