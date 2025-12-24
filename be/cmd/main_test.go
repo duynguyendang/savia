@@ -1,10 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 )
 
@@ -30,36 +30,27 @@ func TestHealthHandler(t *testing.T) {
 	}
 }
 
-func TestReasonHandler(t *testing.T) {
-	req, err := http.NewRequest("POST", "/v1/reason", nil)
+func TestReasonHandler_ServiceUnavailable(t *testing.T) {
+    // mkClient is nil in tests
+	body := map[string]string{
+        "user_id": "test_user",
+        "query": "check balance",
+    }
+    bodyBytes, _ := json.Marshal(body)
+
+	req, err := http.NewRequest("POST", "/v1/reason", bytes.NewReader(bodyBytes))
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	rr := httptest.NewRecorder()
-	projectID := "test-project-id"
-	handler := ReasonHandler(projectID)
+	handler := ReasonHandler("test-project")
 	handler.ServeHTTP(rr, req)
 
-	if status := rr.Code; status != http.StatusOK {
+	// Expect 503 because mkClient is nil
+	if status := rr.Code; status != http.StatusServiceUnavailable {
 		t.Errorf("handler returned wrong status code: got %v want %v",
-			status, http.StatusOK)
-	}
-
-	var resp map[string]string
-	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
-		t.Errorf("Failed to decode response: %v", err)
-	}
-
-	expectedText := "Logic OK, Project: " + projectID
-	if resp["text"] != expectedText {
-		t.Errorf("handler returned unexpected text: got %v want %v",
-			resp["text"], expectedText)
-	}
-
-	if resp["voice_instruction"] != "neutral" {
-		t.Errorf("handler returned unexpected voice_instruction: got %v want %v",
-			resp["voice_instruction"], "neutral")
+			status, http.StatusServiceUnavailable)
 	}
 }
 
@@ -79,8 +70,15 @@ func TestReasonHandler_MethodNotAllowed(t *testing.T) {
 	}
 }
 
-func TestSpeakHandler(t *testing.T) {
-	req, err := http.NewRequest("POST", "/v1/speak", nil)
+func TestSpeakHandler_NoAPIKey(t *testing.T) {
+    // No env var set, expecting 503
+	body := map[string]string{
+        "text": "hello",
+        "voice_id": "voice",
+    }
+    bodyBytes, _ := json.Marshal(body)
+
+	req, err := http.NewRequest("POST", "/v1/speak", bytes.NewReader(bodyBytes))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,17 +87,8 @@ func TestSpeakHandler(t *testing.T) {
 	handler := http.HandlerFunc(SpeakHandler)
 	handler.ServeHTTP(rr, req)
 
-	if status := rr.Code; status != http.StatusOK {
+	if status := rr.Code; status != http.StatusServiceUnavailable {
 		t.Errorf("handler returned wrong status code: got %v want %v",
-			status, http.StatusOK)
-	}
-
-	contentType := rr.Header().Get("Content-Type")
-	if !strings.HasPrefix(contentType, "audio/mpeg") {
-		t.Errorf("handler returned wrong content type: got %v want audio/mpeg", contentType)
-	}
-
-	if len(rr.Body.Bytes()) != 100 {
-		t.Errorf("handler returned wrong content length: got %d want 100", len(rr.Body.Bytes()))
+			status, http.StatusServiceUnavailable)
 	}
 }
