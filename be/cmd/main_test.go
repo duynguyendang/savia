@@ -44,7 +44,7 @@ func TestReasonHandler_ServiceUnavailable(t *testing.T) {
 	}
 
 	rr := httptest.NewRecorder()
-	handler := ReasonHandler("test-project")
+	handler := ReasonHandler()
 	handler.ServeHTTP(rr, req)
 
 	// Expect 503 because mkClient is nil
@@ -61,7 +61,7 @@ func TestReasonHandler_MethodNotAllowed(t *testing.T) {
 	}
 
 	rr := httptest.NewRecorder()
-	handler := ReasonHandler("any-project")
+	handler := ReasonHandler()
 	handler.ServeHTTP(rr, req)
 
 	if status := rr.Code; status != http.StatusMethodNotAllowed {

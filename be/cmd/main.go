@@ -10,33 +10,22 @@ import (
 	"os"
 	"strings"
 
-	"cloud.google.com/go/bigquery"
 	"github.com/duynguyendang/manglekit/config"
 	"github.com/duynguyendang/manglekit/sdk"
     "github.com/duynguyendang/manglekit/providers/google"
 	"github.com/duynguyendang/savia/be/internal/utils"
-	"google.golang.org/api/iterator"
 )
 
 // Global clients
 var (
-	bqClient *bigquery.Client
 	mkClient *sdk.Client
 )
 
 func main() {
 	ctx := context.Background()
 
-	// 1. Auto-Detect Project ID & Init BigQuery
 	var err error
-	bqClient, err = bigquery.NewClient(ctx, bigquery.DetectProjectID)
-	if err != nil {
-		log.Fatalf("Failed to detect project/init BigQuery: %v", err)
-	}
-	projectID := bqClient.Project()
-	log.Printf("Detected Project ID: %s", projectID)
-	// Keep bqClient open for the lifetime of the server
-	// defer bqClient.Close() // In a real server, we might close on shutdown signal
+	// 1. (Removed BQ init)
 
 	// 2. Secrets Verification
 	logSecret("GOOGLE_API_KEY")
@@ -69,7 +58,7 @@ func main() {
 
 	// 4. Handlers
 	http.HandleFunc("/health", HealthHandler)
-	http.HandleFunc("/v1/reason", ReasonHandler(projectID))
+	http.HandleFunc("/v1/reason", ReasonHandler())
 	http.HandleFunc("/v1/speak", SpeakHandler)
 
 	// 5. Port Binding
@@ -108,7 +97,7 @@ type ReasonResponse struct {
     VoiceID          string `json:"voice_id,omitempty"` // Internal use for SpeakHandler, but good to debug
 }
 
-func ReasonHandler(projectID string) http.HandlerFunc {
+func ReasonHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		if r.Method != http.MethodPost {
@@ -206,7 +195,7 @@ func ReasonHandler(projectID string) http.HandlerFunc {
                  if len(resSQL) > 0 {
                      sqlTmpl := resSQL[0]["SQL"]
                      // Execute
-                     bqResultData, err = executeBigQuery(ctx, sqlTmpl, req.UserID)
+                     bqResultData, err = getMockData(ctx, sqlTmpl, req.UserID)
                      if err != nil {
                          log.Printf("BQ Execution Error: %v", err)
                      }
@@ -350,70 +339,11 @@ func SpeakHandler(w http.ResponseWriter, r *http.Request) {
 // Helpers
 
 func getUserContext(ctx context.Context, userID string) (string, int, error) {
-    if bqClient == nil {
-        return "customer", 2, fmt.Errorf("BigQuery client not initialized")
-    }
-    // Query BigQuery
-    // Assuming table `savia.users` with columns `user_id`, `role`, `tenure_years`
-
-    query := fmt.Sprintf("SELECT role, tenure_years FROM `savia.users` WHERE user_id = '%s'", userID)
-    q := bqClient.Query(query)
-    it, err := q.Read(ctx)
-    if err != nil {
-        // Mock for now
-        return "customer", 2, nil
-    }
-
-    var row []bigquery.Value
-    err = it.Next(&row)
-    if err == iterator.Done {
-        return "customer", 0, nil // Not found
-    }
-    if err != nil {
-        return "customer", 0, err
-    }
-
-    role := "customer"
-    if len(row) > 0 && row[0] != nil {
-        role = fmt.Sprintf("%v", row[0])
-    }
-    tenure := 0
-    if len(row) > 1 && row[1] != nil {
-        // Tenure might be int or float
-        if t, ok := row[1].(int64); ok {
-            tenure = int(t)
-        } else if t, ok := row[1].(float64); ok {
-            tenure = int(t)
-        }
-    }
-
-    return role, tenure, nil
+    // Mock implementation for local dev
+    return "manager", 2, nil
 }
 
-func executeBigQuery(ctx context.Context, sqlTmpl string, userID string) (string, error) {
-    // Parameterized Query
-    q := bqClient.Query(sqlTmpl)
-    q.Parameters = []bigquery.QueryParameter{
-        {Name: "user_id", Value: userID},
-    }
-
-    it, err := q.Read(ctx)
-    if err != nil {
-        return "", err
-    }
-
-    var row []bigquery.Value
-    err = it.Next(&row)
-    if err == iterator.Done {
-        return "", nil // Empty
-    }
-    if err != nil {
-        return "", err
-    }
-
-    result := ""
-    for _, col := range row {
-        result += fmt.Sprintf("%v ", col)
-    }
-    return strings.TrimSpace(result), nil
+func getMockData(ctx context.Context, sqlTmpl string, userID string) (string, error) {
+    // Mock data provider instead of BQ
+    return "balance: 1000, currency: USD, status: active", nil
 }
