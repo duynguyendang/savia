@@ -30,11 +30,10 @@ type SaviaResponse struct {
 
 func main() {
 	ctx := context.Background()
-	projectID := os.Getenv("GOOGLE_CLOUD_PROJECT")
 	apiKey := os.Getenv("GOOGLE_API_KEY")
 
 	// 1. Init BigQuery
-	bqClient, err := bigquery.NewClient(ctx, projectID)
+	bqClient, err := bigquery.NewClient(ctx, bigquery.DetectProjectID)
 	if err != nil {
 		log.Printf("Failed to create BigQuery client (continuing for dev): %v", err)
 	}
