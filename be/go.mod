@@ -1,6 +1,6 @@
 module github.com/duynguyendang/savia/be
 
-go 1.25.1
+go 1.25
 
 require (
 	cloud.google.com/go/bigquery v1.72.0
