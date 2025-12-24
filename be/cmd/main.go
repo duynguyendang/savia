@@ -47,7 +47,7 @@ func main() {
     apiKey := os.Getenv("GOOGLE_API_KEY")
     opts := []sdk.ClientOption{
         sdk.WithConfig(cfg),
-        google.Enable(apiKey, "gemini-1.5-flash", "generate"),
+        google.Enable(apiKey, "gemini-3-flash-preview", "generate"),
     }
 
 	mkClient, err = sdk.NewClient(ctx, opts...)
