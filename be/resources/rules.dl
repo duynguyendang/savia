@@ -1,0 +1,66 @@
+% ===========================================================
+% SAVIA BUSINESS RULES (The Manual)
+% Purpose: Routing, Data Synthesis, and Quality Reflection
+% ===========================================================
+
+% --- 1. SQL Query Catalog ---
+% Mapping abstract names to BigQuery SQL templates and their required parameters
+% These are used by the 'bq_executor' Action in the Execute phase.
+
+query_metadata("get_marketing_spend", "SELECT SUM(cost) as total FROM `savia.marketing.daily_ads` WHERE date = @date").
+query_params("get_marketing_spend", "date").
+
+query_metadata("get_user_loyalty", "SELECT loyalty_score, churn_risk FROM `savia.crm.customer_segments` WHERE user_id = @user_id").
+query_params("get_user_loyalty", "user_id").
+
+
+% --- 2. Dynamic Routing Logic ---
+% Logic to decide which BigQuery query to run based on the intent extracted by Gemini.
+
+target_query(QueryID) :- 
+    intent("check_expenses"), 
+    QueryID = "get_marketing_spend".
+
+target_query(QueryID) :- 
+    intent("check_loyalty"), 
+    QueryID = "get_user_loyalty".
+
+
+% --- 3. Advanced Risk & Sophistication Scoring ---
+% Calculating a dynamic score to determine the strictness of the Reflection phase.
+
+% Base risk factors
+risk_weight("financial_intent", 40) :- intent("check_expenses").
+risk_weight("data_privacy", 30)    :- intent("check_loyalty").
+risk_weight("high_value_transaction", 50) :- request_amount(Amt), Amt > 10000.
+
+% Sum total risk for the current session
+total_risk_score(User, Score) :- 
+    Score = sum W : risk_weight(_, W).
+
+
+% --- 4. Reflection & Self-Correction (The Feedback Loop) ---
+% Rules that trigger Manglekit's retry mechanism if Gemini's output is suboptimal.
+
+% Trigger 1: Accuracy Check
+% If BigQuery returns a high churn risk, but Gemini provides a generic 'everything is fine' answer.
+retry(Response, "CRITICAL: BigQuery data shows a high churn risk. Please adjust your tone to be proactive and offer a retention gift.") :-
+    bq_result(Data),
+    json_num(Data, "churn_risk", Risk), Risk > 0.7,
+    json_str(Response, "text", Text),
+    NOT contains_substring(Text, "retention_offer").
+
+% Trigger 2: Sophistication Check
+% Force Gemini to be deeper if the response is too short for a high-risk scenario.
+retry(Response, "INSUFFICIENT DEPTH: This is a high-risk financial query. Please provide a detailed breakdown and mention the specific BigQuery figures.") :-
+    total_risk_score(_, S), S > 60,
+    json_str(Response, "text", T),
+    string_length(T, Len), Len < 100.
+
+
+% --- 5. Adaptive Steering for ElevenLabs ---
+% Providing guidance to the LLM on how to phrase the response for the Voice SDK.
+
+voice_instruction("formal_and_serious") :- total_risk_score(_, S), S > 50.
+voice_instruction("warm_and_welcoming") :- intent("greetings").
+voice_instruction("analytical")          :- intent("check_expenses").
