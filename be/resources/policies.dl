@@ -1,75 +1,15 @@
 % ===========================================================
-% SAVIA GOVERNANCE POLICY (The Law)
-% Version: 1.1
-% Purpose: RBAC Enforcement, Security Gates, and Compliance
+% SAVIA SECURITY GATES
 % ===========================================================
 
-% --- 1. RBAC (Role-Based Access Control) ---
-% These facts (has_role, role_permission) are injected from 
-% the BigQuery 'fetch_rbac' Action during the Assess phase.
+% Halt execution if user lacks role for the intent
+halt(ErrorMsg) :-
+    intent(I),
+    required_role(I, Role),
+    !has_role(_, Role),
+    ErrorMsg = "SECURITY VIOLATION: Access Denied".
 
-% Basic Authorization Rule
-allow(User, Action) :- 
-    has_role(User, Role), 
-    role_permission(Role, Action).
-
-% Sophisticated Privilege: Loyal customers (> 5 years) 
-% are granted "premium_access" regardless of their explicit role.
-allow(User, "premium_access") :- 
-    user_tenure_years(User, Years), Years > 5.
-
-
-% --- 2. Security Denial Gates (Assess Phase) ---
-% These rules halt execution if an unauthorized intent is detected.
-
-% Block if the extracted intent is not permitted for this user
-deny(User, "unauthorized_intent") :- 
-    intent(Action), 
-    NOT allow(User, Action).
-
-% PII Protection: Only users with 'compliance_officer' role can access PII intents
-deny(User, "pii_access_denied") :- 
-    intent("access_pii"), 
-    NOT has_role(User, "compliance_officer").
-
-% Risk Gate: Block requests if the total risk score exceeds the safety threshold
-% (total_risk_score is calculated in rules.dl)
-deny(User, "extreme_risk_threshold") :- 
-    total_risk_score(User, Score), Score > 85.
-
-
-% --- 3. Content Compliance (Reflect Phase) ---
-% These rules audit Gemini's output before it is sent to ElevenLabs.
-
-% Financial intent requires a specific legal disclaimer
-requires_disclaimer(Response) :- 
-    intent("check_expenses").
-
-% Audit for missing disclaimer in high-stakes financial responses
-compliance_violation(Response, "missing_legal_disclaimer") :- 
-    requires_disclaimer(Response), 
-    json_str(Response, "text", Content),
-    NOT contains_substring(Content, "not_financial_advice").
-
-% Audit for over-promising or unverified guarantees
-compliance_violation(Response, "prohibited_guarantee") :- 
-    json_str(Response, "text", Content),
-    contains_substring(Content, "guaranteed_100_percent").
-
-
-% --- 4. Critical Termination (Halt) ---
-% If these predicates are true, Savia stops immediately and returns the ErrorMsg.
-
-
-
-halt(ErrorMsg) :- 
-    deny(_, "unauthorized_intent"), 
-    ErrorMsg = "ACCESS DENIED: Your account does not have the required permissions for this request.".
-
-halt(ErrorMsg) :- 
-    deny(_, "extreme_risk_threshold"), 
-    ErrorMsg = "SECURITY HALT: This request has been flagged as high-risk and requires manual review.".
-
-halt(ErrorMsg) :- 
-    compliance_violation(_, Reason), 
-    ErrorMsg = string_join("COMPLIANCE FAILURE: ", Reason).
+% Define Role Requirements
+required_role("check_balance", "customer").
+required_role("transaction_history", "customer").
+required_role("admin_settings", "admin").

@@ -1,66 +1,51 @@
 % ===========================================================
-% SAVIA BUSINESS RULES (The Manual)
-% Purpose: Routing, Data Synthesis, and Quality Reflection
+% SAVIA KNOWLEDGE REGISTRY & ROUTING
 % ===========================================================
 
-% --- 1. SQL Query Catalog ---
-% Mapping abstract names to BigQuery SQL templates and their required parameters
-% These are used by the 'bq_executor' Action in the Execute phase.
+% --- 1. SEARCH STRATEGY ROUTING ---
+% Structured SQL for precise data
+search_strategy("structured_sql") :- intent("check_balance").
+search_strategy("structured_sql") :- intent("transaction_history").
 
-query_metadata("get_marketing_spend", "SELECT SUM(cost) as total FROM `savia.marketing.daily_ads` WHERE date = @date").
-query_params("get_marketing_spend", "date").
-
-query_metadata("get_user_loyalty", "SELECT loyalty_score, churn_risk FROM `savia.crm.customer_segments` WHERE user_id = @user_id").
-query_params("get_user_loyalty", "user_id").
-
-
-% --- 2. Dynamic Routing Logic ---
-% Logic to decide which BigQuery query to run based on the intent extracted by Gemini.
-
-target_query(QueryID) :- 
-    intent("check_expenses"), 
-    QueryID = "get_marketing_spend".
-
-target_query(QueryID) :- 
-    intent("check_loyalty"), 
-    QueryID = "get_user_loyalty".
+% Semantic Vector Search for knowledge/policy
+search_strategy("vector_semantic") :- intent("policy_inquiry").
+search_strategy("vector_semantic") :- intent("unknown").
 
 
-% --- 3. Advanced Risk & Sophistication Scoring ---
-% Calculating a dynamic score to determine the strictness of the Reflection phase.
+% --- 2. SQL TEMPLATE REGISTRY (Source of Truth) ---
+% Query ID mapping for Go Host to consume
+query_sql("get_balance", "SELECT balance, currency FROM `savia.finance.accounts` WHERE user_id = @user_id").
 
-% Base risk factors
-risk_weight("financial_intent", 40) :- intent("check_expenses").
-risk_weight("data_privacy", 30)    :- intent("check_loyalty").
-risk_weight("high_value_transaction", 50) :- request_amount(Amt), Amt > 10000.
-
-% Sum total risk for the current session
-total_risk_score(User, Score) :- 
-    Score = sum W : risk_weight(_, W).
+query_sql("vector_search", "SELECT text_content FROM VECTOR_SEARCH(TABLE `savia.knowledge.policies`, 'embedding_col', (SELECT ml_generate_embedding_result FROM ML.GENERATE_EMBEDDING(MODEL `savia.models.embed`, (SELECT @query_text AS content))), top_k => 2)").
 
 
-% --- 4. Reflection & Self-Correction (The Feedback Loop) ---
-% Rules that trigger Manglekit's retry mechanism if Gemini's output is suboptimal.
+% --- 3. PROMPT BLUEPRINT REGISTRY ---
+% Defines how Gemini Flash should behave
+prompt_blueprint("standard_data", "
+    System: You are Savia. Vibe: {{vibe}}.
+    Context: The user asked about {{intent}}.
+    Truth Data: {{data}}.
+    History: {{history}}.
+    Instruction: Answer concisely using the Truth Data.
+").
 
-% Trigger 1: Accuracy Check
-% If BigQuery returns a high churn risk, but Gemini provides a generic 'everything is fine' answer.
-retry(Response, "CRITICAL: BigQuery data shows a high churn risk. Please adjust your tone to be proactive and offer a retention gift.") :-
-    bq_result(Data),
-    json_num(Data, "churn_risk", Risk), Risk > 0.7,
-    json_str(Response, "text", Text),
-    NOT contains_substring(Text, "retention_offer").
-
-% Trigger 2: Sophistication Check
-% Force Gemini to be deeper if the response is too short for a high-risk scenario.
-retry(Response, "INSUFFICIENT DEPTH: This is a high-risk financial query. Please provide a detailed breakdown and mention the specific BigQuery figures.") :-
-    total_risk_score(_, S), S > 60,
-    json_str(Response, "text", T),
-    string_length(T, Len), Len < 100.
+prompt_blueprint("missing_data", "
+    System: You are Savia. Vibe: Empathetic.
+    Instruction: Politely inform the user that data for {{intent}} is not available. Suggest checking 'Balance'.
+").
 
 
-% --- 5. Adaptive Steering for ElevenLabs ---
-% Providing guidance to the LLM on how to phrase the response for the Voice SDK.
+% --- 4. SYNTHESIS LOGIC (Variable Mapping) ---
+% Select active template
+active_template("standard_data") :- bq_result(D), !is_empty(D).
+active_template("missing_data")  :- bq_result(D), is_empty(D).
 
-voice_instruction("formal_and_serious") :- total_risk_score(_, S), S > 50.
-voice_instruction("warm_and_welcoming") :- intent("greetings").
-voice_instruction("analytical")          :- intent("check_expenses").
+% Compute Variables for Interpolation
+prompt_var("vibe", "Warm and Professional") :- user_tenure_years(_, Y), Y > 3.
+prompt_var("vibe", "Efficient and Direct")  :- user_tenure_years(_, Y), Y <= 3.
+prompt_var("data", D) :- bq_result(D).
+prompt_var("history", H) :- chat_history(H).
+
+% --- 5. VOICE STEERING ---
+voice_style("stable") :- search_strategy("structured_sql").
+voice_style("expressive") :- search_strategy("vector_semantic").
