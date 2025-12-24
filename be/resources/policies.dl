@@ -7,7 +7,7 @@ halt(ErrorMsg) :-
     intent(I),
     required_role(I, Role),
     !has_role(_, Role),
-    ErrorMsg = "SECURITY VIOLATION: Access Denied".
+    ErrorMsg = "SECURITY VIOLATION".
 
 % Define Role Requirements
 required_role("check_balance", "customer").
