@@ -7,178 +7,87 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"time"
 
 	"cloud.google.com/go/bigquery"
-	"github.com/duynguyendang/manglekit/providers/google"
-	"github.com/duynguyendang/manglekit/sdk"
-	"github.com/duynguyendang/savia/be/internal/actions"
-	"github.com/duynguyendang/savia/be/internal/tts"
-	"github.com/duynguyendang/savia/be/internal/utils"
 )
-
-type SaviaRequest struct {
-	UserID  string `json:"user_id"`
-	Message string `json:"message"`
-}
-
-type SaviaResponse struct {
-	Text    string `json:"text"`
-	VoiceID string `json:"voice_id"`
-	TraceID string `json:"trace_id"`
-}
 
 func main() {
 	ctx := context.Background()
-	apiKey := os.Getenv("GOOGLE_API_KEY")
 
-	// 1. Init BigQuery
+	// 1. Auto-Detect Project ID
 	bqClient, err := bigquery.NewClient(ctx, bigquery.DetectProjectID)
 	if err != nil {
-		log.Printf("Failed to create BigQuery client (continuing for dev): %v", err)
+		log.Fatalf("Failed to detect project: %v", err)
 	}
-	if bqClient != nil {
-		defer bqClient.Close()
+	projectID := bqClient.Project()
+	log.Printf("Detected Project ID: %s", projectID)
+	// We don't strictly need to keep the client open, but we should close it.
+	bqClient.Close()
+
+	// 2. Secrets Verification
+	logSecret("GOOGLE_API_KEY")
+	logSecret("ELEVENLABS_API_KEY")
+
+	// 3. File Check
+	if _, err := os.Stat("./resources/"); !os.IsNotExist(err) {
+		log.Println("./resources/ directory exists")
+	} else {
+		log.Println("./resources/ directory does NOT exist")
 	}
 
-	// 2. Init Manglekit Kernel with Gemini Flash
-	// Using WithBlueprintPath to load logic files and google.Enable for LLM
-	mkit, err := sdk.NewClient(ctx,
-		sdk.WithBlueprintPath("./resources/policies.dl"),
-		sdk.WithBlueprintPath("./resources/rules.dl"),
-		google.Enable(apiKey, "gemini-1.5-flash", ""),
-	)
-	if err != nil {
+	// 4. Handlers
+	http.HandleFunc("/health", HealthHandler)
+	http.HandleFunc("/v1/reason", ReasonHandler(projectID))
+	http.HandleFunc("/v1/speak", SpeakHandler)
+
+	// 5. Port Binding
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	log.Printf("Listening on port %s", port)
+	if err := http.ListenAndServe(":"+port, nil); err != nil {
 		log.Fatal(err)
-	}
-
-	// ---------------------------------------------------------
-	// ACTION 1: Assess Context (RBAC & History)
-	// ---------------------------------------------------------
-	mkit.RegisterAction("assess_context", actions.NewAssessContext())
-
-	// Define logger
-	logger := mkit.Logger()
-
-	// ---------------------------------------------------------
-	// ACTION 2: Smart BQ Executor (SQL & Vector)
-	// ---------------------------------------------------------
-	mkit.RegisterAction("bq_executor", actions.NewBQExecutor(bqClient, logger))
-
-	// ---------------------------------------------------------
-	// HTTP Handlers
-	// ---------------------------------------------------------
-	http.HandleFunc("/v1/reason", ReasonHandler(mkit))
-	http.HandleFunc("/v1/speak", SpeakHandler())
-	http.HandleFunc("/health", HealthHandler())
-
-	logger.Info("Savia-BE listening on :8080")
-	if err := http.ListenAndServe(":8080", nil); err != nil {
-		logger.Error("Server failed", "error", err)
-		os.Exit(1)
 	}
 }
 
-// ReasonHandler returns the http.HandlerFunc for the reasoning endpoint
-func ReasonHandler(mkit *sdk.Client) http.HandlerFunc {
+func logSecret(key string) {
+	val := os.Getenv(key)
+	if len(val) >= 4 {
+		log.Printf("%s: %s...", key, val[:4])
+	} else {
+		log.Printf("%s: (not set or too short)", key)
+	}
+}
+
+func HealthHandler(w http.ResponseWriter, r *http.Request) {
+	fmt.Fprint(w, "OK")
+}
+
+func ReasonHandler(projectID string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 
-		var req SaviaRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid JSON", http.StatusBadRequest)
-			return
+		resp := map[string]string{
+			"text":              "Logic OK, Project: " + projectID,
+			"voice_instruction": "neutral",
 		}
-
-		// A. Execute Manglekit Loop
-		initialFacts := map[string]interface{}{
-			"user_id": req.UserID,
-			"message": req.Message,
-			"intent":  "check_balance", // Mocked intent injection
-		}
-
-		result, err := mkit.ExecuteByName(r.Context(), "savia_agent", initialFacts)
-
-		if err != nil {
-			http.Error(w, fmt.Sprintf("Policy Block: %v", err), http.StatusForbidden)
-			return
-		}
-
-		// B. Prompt Synthesis
-		// Using utils to parse facts from result.Facts ([]string)
-		templateID := utils.GetFactValue(result.Facts, "active_template")
-		if templateID == "" {
-			templateID = "standard_data"
-		}
-
-		blueprint := utils.GetBlueprintContent(result.Facts, templateID)
-		if blueprint == "" {
-			blueprint = "System: You are Savia. Truth Data: {{data}}."
-		}
-
-		vars, err := utils.ExtractPromptVars(r.Context(), mkit, result.Facts)
-		if err != nil {
-			// Log error via mkit logger if accessible, or standard log if we don't have logger in closure.
-			// ReasonHandler doesn't have 'logger' in closure, only 'mkit'.
-			// We can get logger from mkit.
-			mkit.Logger().Error("Failed to extract prompt vars", "error", err)
-			vars = make(map[string]interface{})
-		}
-		finalText := utils.Interpolate(blueprint, vars)
-
-		voiceID := utils.GetFactValue(result.Facts, "active_voice_id")
-
-		// C. Response Construction
-		resp := SaviaResponse{
-			Text:    finalText,
-			VoiceID: voiceID,
-			TraceID: fmt.Sprintf("sv-%d", time.Now().Unix()),
-		}
-
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)
 	}
 }
 
-// SpeakHandler returns the http.HandlerFunc for the TTS proxy endpoint
-func SpeakHandler() http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		var req struct {
-			Text    string `json:"text"`
-			VoiceID string `json:"voice_id"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid JSON", http.StatusBadRequest)
-			return
-		}
-
-		if err := tts.StreamSpeech(w, req.Text, req.VoiceID); err != nil {
-			// tts.StreamSpeech handles writing to w on success or some errors,
-			// but if it returns error we might want to log it.
-			// However, since StreamSpeech might have already written headers, be careful.
-			// For now, let's assume StreamSpeech writes errors to w if it can,
-			// or returns error if it failed before writing.
-			// Actually my implementation of StreamSpeech writes specific errors.
-			// The only case it returns error without writing (maybe) is env var check.
-			// Let's just log it.
-			fmt.Printf("TTS Error: %v\n", err)
-			return
-		}
+func SpeakHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
 	}
-}
 
-// HealthHandler returns the http.HandlerFunc for the health check endpoint
-func HealthHandler() http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, "Savia is Wise and Healthy")
-	}
+	w.Header().Set("Content-Type", "audio/mpeg")
+	// 100 bytes of dummy data
+	data := make([]byte, 100)
+	w.Write(data)
 }
