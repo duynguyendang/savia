@@ -8,7 +8,10 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/duynguyendang/manglekit/config"
 	"github.com/duynguyendang/manglekit/providers/google"
@@ -61,15 +64,38 @@ func main() {
 	http.HandleFunc("/v1/reason", ReasonHandler())
 	http.HandleFunc("/v1/speak", SpeakHandler)
 
-	// 5. Port Binding
+	// 5. Port Binding and Graceful Shutdown
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
 	}
-	log.Printf("Listening on port %s", port)
-	if err := http.ListenAndServe(":"+port, nil); err != nil {
-		log.Fatal(err)
+
+	srv := &http.Server{
+		Addr: ":" + port,
 	}
+
+	// Run server in a goroutine
+	go func() {
+		log.Printf("Listening on port %s", port)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("listen: %s\n", err)
+		}
+	}()
+
+	// Wait for interrupt signal to gracefully shutdown the server with
+	// a timeout of 10 seconds.
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
+	<-quit
+	log.Println("Shutting down server...")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Fatal("Server forced to shutdown:", err)
+	}
+
+	log.Println("Server exiting")
 }
 
 func logSecret(key string) {
