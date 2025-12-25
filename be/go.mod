@@ -1,12 +1,10 @@
-module github.com/duynguyendang/savia/be
+module github.com/duynguyendang/savia-be
 
 go 1.25
 
 require (
 	cloud.google.com/go/bigquery v1.72.0
 	github.com/duynguyendang/manglekit v0.0.0-20251222061847-35c3f380505f
-	github.com/firebase/genkit/go v1.2.0
-	google.golang.org/api v0.250.0
 )
 
 require (
@@ -21,6 +19,7 @@ require (
 	github.com/bahlo/generic-list-go v0.2.0 // indirect
 	github.com/buger/jsonparser v1.1.1 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
+	github.com/firebase/genkit/go v1.2.0 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/goccy/go-json v0.10.4 // indirect
@@ -69,6 +68,7 @@ require (
 	golang.org/x/time v0.13.0 // indirect
 	golang.org/x/tools v0.36.0 // indirect
 	golang.org/x/xerrors v0.0.0-20240903120638-7835f813f4da // indirect
+	google.golang.org/api v0.250.0 // indirect
 	google.golang.org/genai v1.30.0 // indirect
 	google.golang.org/genproto v0.0.0-20250603155806-513f23925822 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20250818200422-3122310a409c // indirect

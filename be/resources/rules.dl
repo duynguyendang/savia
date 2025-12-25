@@ -1,4 +1,29 @@
 % ===========================================================
+% SAVIA SECURITY GATES
+% ===========================================================
+
+% --- 0. DYNAMIC INPUT SCHEMAS (Placeholders) ---
+% These are required so the solver knows these predicates exist at load time.
+intent("sys_init").
+has_role("sys_init", "none").
+user_tenure_years("sys_init", 0).
+chat_history("sys_init").
+bq_result("sys_init").
+is_empty("").
+
+% Halt execution if user lacks role for the intent
+halt(ErrorMsg) :-
+    intent(I),
+    required_role(I, Role),
+    !has_role(_, Role),
+    ErrorMsg = "SECURITY VIOLATION".
+
+% Define Role Requirements
+required_role("check_balance", "customer").
+required_role("transaction_history", "customer").
+required_role("admin_settings", "admin").
+
+% ===========================================================
 % SAVIA KNOWLEDGE REGISTRY & ROUTING
 % ===========================================================
 
