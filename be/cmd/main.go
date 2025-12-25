@@ -60,9 +60,9 @@ func main() {
 	log.Println("Manglekit initialized.")
 
 	// 4. Handlers
-	http.HandleFunc("/health", HealthHandler)
-	http.HandleFunc("/v1/reason", ReasonHandler())
-	http.HandleFunc("/v1/speak", SpeakHandler)
+	http.HandleFunc("/health", enableCORS(HealthHandler))
+	http.HandleFunc("/v1/reason", enableCORS(ReasonHandler()))
+	http.HandleFunc("/v1/speak", enableCORS(SpeakHandler))
 
 	// 5. Port Binding and Graceful Shutdown
 	port := os.Getenv("PORT")
@@ -104,6 +104,21 @@ func logSecret(key string) {
 		log.Printf("%s: %s...", key, val[:4])
 	} else {
 		log.Printf("%s: (not set or too short)", key)
+	}
+}
+
+func enableCORS(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, xi-api-key")
+
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		next(w, r)
 	}
 }
 
