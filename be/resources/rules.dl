@@ -3,7 +3,6 @@
 % ===========================================================
 
 % --- 0. DYNAMIC INPUT SCHEMAS (Placeholders) ---
-% These are required so the solver knows these predicates exist at load time.
 intent("sys_init").
 has_role("sys_init", "none").
 user_tenure_years("sys_init", 0).
@@ -11,14 +10,12 @@ chat_history("sys_init").
 bq_result("sys_init").
 is_empty("").
 
-% Halt execution if user lacks role for the intent
 halt(ErrorMsg) :-
     intent(I),
     required_role(I, Role),
     !has_role(_, Role),
     ErrorMsg = "SECURITY VIOLATION".
 
-% Define Role Requirements
 required_role("check_balance", "customer").
 required_role("transaction_history", "customer").
 required_role("admin_settings", "admin").
@@ -28,24 +25,19 @@ required_role("admin_settings", "admin").
 % ===========================================================
 
 % --- 1. SEARCH STRATEGY ROUTING ---
-% Structured SQL for precise data
 search_strategy("structured_sql") :- intent("check_balance").
 search_strategy("structured_sql") :- intent("transaction_history").
+search_strategy("structured_sql") :- intent("stock_price").
+search_strategy("structured_sql") :- intent("stock_info").
 
-% Semantic Vector Search for knowledge/policy
 search_strategy("vector_semantic") :- intent("policy_inquiry").
 search_strategy("vector_semantic") :- intent("unknown").
 
-
-% --- 2. SQL TEMPLATE REGISTRY (Source of Truth) ---
-% Query ID mapping for Go Host to consume
+% --- 2. SQL TEMPLATE REGISTRY ---
 query_sql("get_balance", "SELECT balance, currency FROM `savia.finance.accounts` WHERE user_id = @user_id").
-
 query_sql("vector_search", "SELECT text_content FROM VECTOR_SEARCH(TABLE `savia.knowledge.policies`, 'embedding_col', (SELECT ml_generate_embedding_result FROM ML.GENERATE_EMBEDDING(MODEL `savia.models.embed`, (SELECT @query_text AS content))), top_k => 2)").
 
-
 % --- 3. PROMPT BLUEPRINT REGISTRY ---
-% Defines how Gemini Flash should behave
 prompt_blueprint("standard_data", "
     System: You are Savia. Vibe: {{vibe}}.
     Context: The user asked about {{intent}}.
@@ -59,31 +51,166 @@ prompt_blueprint("missing_data", "
     Instruction: Politely inform the user that data for {{intent}} is not available. Suggest checking 'Balance'.
 ").
 
+prompt_blueprint("stock_info", "
+    System: You are Savia. You are a knowledgeable financial advisor.
+    Context: {{data}}.
+    History: {{history}}.
+    Instruction: Provide a helpful, concise summary of the stock information. Include the price, company name, sector, and any notable metrics.
+").
 
-% --- 4. SYNTHESIS LOGIC (Variable Mapping) ---
-% Select active template
+% --- 4. SYNTHESIS LOGIC ---
 active_template("standard_data") :- bq_result(D), !is_empty(D).
 active_template("missing_data")  :- bq_result(D), is_empty(D).
+active_template("stock_info")   :- intent(I), I = "stock_info".
 
-% Compute Variables for Interpolation
 prompt_var("vibe", "Warm and Professional") :- user_tenure_years(_, Y), Y > 3.
 prompt_var("vibe", "Efficient and Direct")  :- user_tenure_years(_, Y), Y <= 3.
 prompt_var("data", D) :- bq_result(D).
 prompt_var("history", H) :- chat_history(H).
 
 % --- 5. VOICE STEERING ---
+voice_data("analytical", "21m00Tcm4TlvDq8ikWAM").
+voice_data("empathetic", "AZnzlk1XvdvUeBnXmlld").
 
-% Voice Registry
-voice_data("analytical", "21m00Tcm4TlvDq8ikWAM"). % Rachel
-voice_data("empathetic", "AZnzlk1XvdvUeBnXmlld"). % Domi
-
-% Voice Style Mapping
 voice_style("empathetic") :- user_tenure_years(_, Y), Y > 3.
 voice_style("analytical") :- user_tenure_years(_, Y), Y <= 3.
 voice_style("analytical") :- search_strategy("structured_sql").
 voice_style("empathetic") :- search_strategy("vector_semantic").
 
-% Select Voice ID based on style
-active_voice_id(ID) :- 
-    voice_style(Style), 
+active_voice_id(ID) :-
+    voice_style(Style),
     voice_data(Style, ID).
+
+% ===========================================================
+% STOCK CATALOG
+% ===========================================================
+
+stock("AAPL").
+stock("GOOGL").
+stock("MSFT").
+stock("AMZN").
+stock("NVDA").
+
+stock_company("AAPL", "Apple Inc.").
+stock_company("GOOGL", "Alphabet Inc.").
+stock_company("MSFT", "Microsoft Corporation").
+stock_company("AMZN", "Amazon.com Inc.").
+stock_company("NVDA", "NVIDIA Corporation").
+
+stock_price("AAPL", "185.50").
+stock_price("GOOGL", "142.30").
+stock_price("MSFT", "378.91").
+stock_price("AMZN", "178.25").
+stock_price("NVDA", "875.35").
+
+stock_sector("AAPL", "Technology").
+stock_sector("GOOGL", "Technology").
+stock_sector("MSFT", "Technology").
+stock_sector("AMZN", "Consumer Cyclical").
+stock_sector("NVDA", "Technology").
+
+% ===========================================================
+% FUNDAMENTALS
+% ===========================================================
+
+stock_market_cap("AAPL", "2900").
+stock_market_cap("GOOGL", "1750").
+stock_market_cap("MSFT", "2820").
+stock_market_cap("AMZN", "1850").
+stock_market_cap("NVDA", "2150").
+
+stock_pe_ratio("AAPL", "28.5").
+stock_pe_ratio("GOOGL", "24.2").
+stock_pe_ratio("MSFT", "35.1").
+stock_pe_ratio("AMZN", "62.3").
+stock_pe_ratio("NVDA", "65.8").
+
+stock_dividend_yield("AAPL", "0.52").
+stock_dividend_yield("GOOGL", "0.00").
+stock_dividend_yield("MSFT", "0.74").
+stock_dividend_yield("AMZN", "0.00").
+stock_dividend_yield("NVDA", "0.03").
+
+stock_52w_high("AAPL", "199.62").
+stock_52w_high("GOOGL", "153.78").
+stock_52w_high("MSFT", "384.30").
+stock_52w_high("AMZN", "189.77").
+stock_52w_high("NVDA", "974.00").
+
+stock_52w_low("AAPL", "164.08").
+stock_52w_low("GOOGL", "115.35").
+stock_52w_low("MSFT", "309.45").
+stock_52w_low("AMZN", "118.35").
+stock_52w_low("NVDA", "402.00").
+
+% ===========================================================
+% HISTORICAL PERFORMANCE
+% ===========================================================
+
+stock_return_1y("AAPL", "8.2").
+stock_return_1y("GOOGL", "-3.5").
+stock_return_1y("MSFT", "15.7").
+stock_return_1y("AMZN", "22.1").
+stock_return_1y("NVDA", "118.4").
+
+% ===========================================================
+% ANALYST RATINGS
+% ===========================================================
+
+stock_rating("AAPL", "buy").
+stock_rating("GOOGL", "buy").
+stock_rating("MSFT", "buy").
+stock_rating("AMZN", "hold").
+stock_rating("NVDA", "hold").
+
+% ===========================================================
+% NEWS SENTIMENT
+% ===========================================================
+
+stock_sentiment("AAPL", "positive").
+stock_sentiment("GOOGL", "neutral").
+stock_sentiment("MSFT", "positive").
+stock_sentiment("AMZN", "positive").
+stock_sentiment("NVDA", "positive").
+
+% ===========================================================
+% USER PORTFOLIO
+% ===========================================================
+
+user_portfolio("demo_user", "AAPL", 50, "178.25").
+user_portfolio("demo_user", "MSFT", 25, "365.00").
+user_portfolio("demo_user", "NVDA", 10, "720.00").
+
+portfolio_total_value("demo_user", "24187.50").
+
+% ===========================================================
+% MARKET STATUS
+% ===========================================================
+
+market_status("US", "open").
+market_status("EU", "closed").
+market_status("ASIA", "closed").
+
+market_open_hour("US", 9, 30).
+market_close_hour("US", 16, 0).
+
+% ===========================================================
+% STOCK QUERY RULES
+% ===========================================================
+
+% Stock info lookup
+stock_info_data(Symbol, Info) :-
+    stock_company(Symbol, Company),
+    stock_price(Symbol, Price),
+    stock_sector(Symbol, Sector),
+    stock_market_cap(Symbol, MarketCap),
+    stock_pe_ratio(Symbol, PE),
+    stock_rating(Symbol, Rating),
+    stock_sentiment(Symbol, Sentiment).
+
+% Position gain/loss
+position_gain_loss(User, Symbol, GainLoss) :-
+    user_portfolio(User, Symbol, Shares, PurchasePrice),
+    stock_price(Symbol, CurrentPrice),
+    Diff is CurrentPrice - PurchasePrice,
+    GainLoss is Diff * Shares.

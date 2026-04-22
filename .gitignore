@@ -1,1 +1,5 @@
 docs/
+ref/
+*.log
+*.tmp
+hosting*

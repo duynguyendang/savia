@@ -5,8 +5,8 @@ export interface SaviaRequest {
 
 export interface SaviaResponse {
     text: string;
-    voice_instruction: "stable" | "expressive"; // Mapped from Logic rules.dl
-    trace_id: string; // For Logical Observability
+    voice_instruction: "stable" | "expressive";
+    trace_id: string;
 }
 
 export type BrainState = 'IDLE' | 'LISTENING' | 'REASONING' | 'SPEAKING' | 'HALTED';

@@ -1,17 +1,22 @@
-# be/Dockerfile
-FROM golang:1.25.5-alpine AS builder
+FROM golang:1.25-alpine AS builder
 WORKDIR /app
 COPY go.mod go.sum ./
+COPY cmd/ ./cmd/
 RUN go mod download
-COPY . .
-# Build binary
-RUN go build -o main ./cmd/main.go
+RUN CGO_ENABLED=0 go build -o savia-be ./cmd
 
-# Final stage
-FROM alpine:latest
-WORKDIR /root/
-# Quan trọng: Copy các file logic Datalog vào container
-COPY --from=builder /app/resources ./resources
-COPY --from=builder /app/main .
+FROM ubuntu:22.04
+
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /root
+
+COPY --from=builder /app/savia-be /root/savia-be
+
+RUN chmod +x /root/savia-be
+
+ENV PORT=8080
+
 EXPOSE 8080
-CMD ["./main"]
+
+CMD ["/root/savia-be"]

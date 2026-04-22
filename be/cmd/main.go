@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"os"
@@ -16,65 +15,51 @@ import (
 	"github.com/duynguyendang/manglekit/config"
 	"github.com/duynguyendang/manglekit/providers/google"
 	"github.com/duynguyendang/manglekit/sdk"
-	"github.com/duynguyendang/savia-be/internal/utils"
+	"github.com/google/generative-ai-go/genai"
+	"google.golang.org/api/option"
 )
 
-// Global clients
 var (
-	mkClient *sdk.Client
+	mkClient             *sdk.Client
+	defaultAPIKey        string
+	manglekitInitialized bool
 )
 
 func main() {
 	ctx := context.Background()
 
-	var err error
-	// 1. (Removed BQ init)
-
-	// 2. Secrets Verification
-	logSecret("GOOGLE_API_KEY")
-	elevenKey := os.Getenv("ELEVENLABS_API_KEY")
-	if len(elevenKey) < 5 {
-		log.Printf("Warning: ELEVENLABS_API_KEY is missing or too short")
+	// Get default API key from environment
+	defaultAPIKey = os.Getenv("GOOGLE_API_KEY")
+	if defaultAPIKey == "" {
+		defaultAPIKey = os.Getenv("GEMINI_API_KEY")
+	}
+	if defaultAPIKey != "" {
+		log.Printf("Default API key found: %s...", defaultAPIKey[:4])
+	} else {
+		log.Println("Warning: No default API key configured (users must provide their own)")
 	}
 
-	// 3. Initialize Manglekit
-	log.Println("Initializing Manglekit...")
-	// Configure Policy Path
-	cfg := &config.Config{
-		Policy: config.PolicyConfig{
-			Path: "./resources/rules.dl",
-		},
-	}
-
-	// Initialize Client with Google Provider
-	apiKey := os.Getenv("GOOGLE_API_KEY")
-	opts := []sdk.ClientOption{
-		sdk.WithConfig(cfg),
-		google.Enable(apiKey, "gemini-3-flash-preview", "generate"),
-	}
-
-	mkClient, err = sdk.NewClient(ctx, opts...)
+	// Initialize Manglekit (optional - will fallback if fails)
+	err := initManglekit(ctx)
 	if err != nil {
-		log.Fatalf("Failed to initialize Manglekit: %v", err)
+		log.Printf("Manglekit initialization failed (will use fallback mode): %v", err)
 	}
-	log.Println("Manglekit initialized.")
 
-	// 4. Handlers
-	http.HandleFunc("/health", enableCORS(HealthHandler))
-	http.HandleFunc("/v1/reason", enableCORS(ReasonHandler()))
-	http.HandleFunc("/v1/speak", enableCORS(SpeakHandler))
-
-	// 5. Port Binding and Graceful Shutdown
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
 	}
 
+	log.Printf("Server starting on port %s", port)
+
+	http.HandleFunc("/health", enableCORS(HealthHandler))
+	http.HandleFunc("/v1/reason", enableCORS(ReasonHandler()))
+	http.HandleFunc("/v1/speak", enableCORS(SpeakHandler))
+
 	srv := &http.Server{
 		Addr: ":" + port,
 	}
 
-	// Run server in a goroutine
 	go func() {
 		log.Printf("Listening on port %s", port)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -82,8 +67,6 @@ func main() {
 		}
 	}()
 
-	// Wait for interrupt signal to gracefully shutdown the server with
-	// a timeout of 10 seconds.
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
 	<-quit
@@ -98,20 +81,44 @@ func main() {
 	log.Println("Server exiting")
 }
 
-func logSecret(key string) {
-	val := os.Getenv(key)
-	if len(val) >= 4 {
-		log.Printf("%s: %s...", key, val[:4])
-	} else {
-		log.Printf("%s: (not set or too short)", key)
+func initManglekit(ctx context.Context) error {
+	if defaultAPIKey == "" {
+		return fmt.Errorf("no API key available for Manglekit")
 	}
+
+	cfg := &config.Config{
+		Policy: config.PolicyConfig{
+			Path: "./resources/rules.dl",
+		},
+	}
+
+	opts := []sdk.ClientOption{
+		sdk.WithConfig(cfg),
+		google.Enable(defaultAPIKey, "gemini-2.0-flash", "generate"),
+	}
+
+	var err error
+	mkClient, err = sdk.NewClient(ctx, opts...)
+	if err != nil {
+		return fmt.Errorf("failed to create Manglekit client: %w", err)
+	}
+
+	log.Println("Manglekit initialized successfully")
+	manglekitInitialized = true
+	return nil
 }
 
 func enableCORS(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, xi-api-key")
+		origin := r.Header.Get("Origin")
+		if origin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+		} else {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+		}
+		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Gemini-Api-Key, X-Admin-Mode, Authorization")
+		w.Header().Set("Access-Control-Max-Age", "3600")
 
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusOK)
@@ -123,24 +130,28 @@ func enableCORS(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func HealthHandler(w http.ResponseWriter, r *http.Request) {
-	fmt.Fprint(w, "OK")
+	status := "OK"
+	if !manglekitInitialized {
+		status = "OK (fallback mode)"
+	}
+	fmt.Fprint(w, status)
 }
 
-// Request/Response definitions
 type ReasonRequest struct {
-	UserID string `json:"user_id"`
-	Query  string `json:"query"`
+	UserID  string `json:"user_id"`
+	Message string `json:"message"`
+	Role    string `json:"role,omitempty"`
 }
 
 type ReasonResponse struct {
 	Text             string `json:"text"`
 	VoiceInstruction string `json:"voice_instruction"`
-	VoiceID          string `json:"voice_id,omitempty"` // Internal use for SpeakHandler, but good to debug
+	SearchStrategy   string `json:"search_strategy,omitempty"`
+	Intent           string `json:"intent,omitempty"`
 }
 
 func ReasonHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		ctx := r.Context()
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -152,239 +163,291 @@ func ReasonHandler() http.HandlerFunc {
 			return
 		}
 
-		// Simple keyword heuristic for intent
-		intent := "unknown"
-		if strings.Contains(strings.ToLower(req.Query), "balance") {
-			intent = "check_balance"
-		} else if strings.Contains(strings.ToLower(req.Query), "policy") {
-			intent = "policy_inquiry"
-		} else if strings.Contains(strings.ToLower(req.Query), "transaction") {
-			intent = "transaction_history"
-		}
-		// Admin?
-		if strings.Contains(strings.ToLower(req.Query), "admin") {
-			intent = "admin_settings"
+		// Get API key (user-provided or default)
+		apiKey := r.Header.Get("X-Gemini-Api-Key")
+		if apiKey == "" {
+			apiKey = defaultAPIKey
 		}
 
-		// --- Action: assess_context ---
-		// Fetch user role and tenure from BigQuery
-		role, tenure, err := getUserContext(ctx, req.UserID)
-		if err != nil {
-			log.Printf("Error fetching context: %v", err)
-			// Proceed with defaults
-			role = "customer"
-			tenure = 1
-		}
-
-		// Construct Facts
-		facts := []string{
-			fmt.Sprintf("intent(\"%s\")", intent),
-			fmt.Sprintf("has_role(\"%s\", \"%s\")", req.UserID, role),
-			fmt.Sprintf("user_tenure_years(\"%s\", %d)", req.UserID, tenure),
-			fmt.Sprintf("chat_history(\"User: %s\")", req.Query),
-		}
-
-		// --- Logic: Security Check (Halt) ---
-		if mkClient == nil {
-			log.Println("Manglekit Client not initialized")
-			http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
+		if apiKey == "" {
+			http.Error(w, "API key not configured", http.StatusUnauthorized)
 			return
 		}
 
-		// Query: halt(Msg)
-		resHalt, err := mkClient.Engine().Query(ctx, facts, "halt(Msg)")
+		ctx := r.Context()
+
+		// Check for admin mode (via header or request body)
+		isAdmin := r.Header.Get("X-Admin-Mode") == "true" || req.Role == "admin"
+		userID := req.UserID
+		if userID == "" {
+			userID = "demo_user"
+		}
+
+		// Extract intent using LLM
+		intent, intentErr := detectIntentWithLLM(ctx, apiKey, req.Message)
+		if intentErr != nil {
+			intent = detectIntent(req.Message)
+			log.Printf("LLM intent detection failed: %v", intentErr)
+		}
+		log.Printf("Intent: %s, isAdmin: %v, userID: %s", intent, isAdmin, userID)
+
+		// Get mock user data
+		balance, transactions := getMockUserData(userID)
+
+		// Process with single LLM call (intent + response combined)
+		response, err := processUserQuery(ctx, apiKey, req.Message, intent, isAdmin, balance, transactions)
+
 		if err != nil {
-			log.Printf("Manglekit Query Error: %v", err)
-			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			log.Printf("processUserQuery failed: %v", err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if len(resHalt) > 0 {
-			msg := "Access Denied"
-			if m, ok := resHalt[0]["Msg"]; ok {
-				msg = m
-			}
-			log.Printf("Halt triggered: %s", msg)
-			http.Error(w, msg, http.StatusForbidden)
-			return
-		}
 
-		// --- Logic: Routing (Search Strategy) ---
-		// Query: search_strategy(S)
-		resStrat, _ := mkClient.Engine().Query(ctx, facts, "search_strategy(S)")
-		strategy := "unknown"
-		if len(resStrat) > 0 {
-			if s, ok := resStrat[0]["S"]; ok {
-				strategy = s
-			}
-		}
-
-		// Append strategy to facts for downstream rules
-		facts = append(facts, fmt.Sprintf("search_strategy(\"%s\")", strategy))
-
-		// --- Logic: Execution ---
-		var bqResultData string
-
-		if strategy == "structured_sql" {
-			queryID := ""
-			if intent == "check_balance" {
-				queryID = "get_balance"
-			}
-
-			if queryID != "" {
-				// Get SQL Template
-				resSQL, _ := mkClient.Engine().Query(ctx, facts, fmt.Sprintf("query_sql(\"%s\", SQL)", queryID))
-				if len(resSQL) > 0 {
-					sqlTmpl := resSQL[0]["SQL"]
-					// Execute
-					bqResultData, err = getMockData(ctx, sqlTmpl, req.UserID)
-					if err != nil {
-						log.Printf("BQ Execution Error: %v", err)
-					}
-				}
-			}
-		} else if strategy == "vector_semantic" {
-			bqResultData = "Policy details: Security first."
-		}
-
-		// Inject Result
-		facts = append(facts, fmt.Sprintf("bq_result(\"%s\")", bqResultData))
-
-		// --- Logic: Prompt Synthesis ---
-		// Query: active_template(ID)
-		resTmpl, _ := mkClient.Engine().Query(ctx, facts, "active_template(T)")
-		activeTmplID := "standard_data" // default
-		if len(resTmpl) > 0 {
-			if t, ok := resTmpl[0]["T"]; ok {
-				activeTmplID = t
-			}
-		}
-
-		// Get Blueprint Content
-		resBP, _ := mkClient.Engine().Query(ctx, facts, fmt.Sprintf("prompt_blueprint(\"%s\", C)", activeTmplID))
-		blueprint := ""
-		if len(resBP) > 0 {
-			blueprint = resBP[0]["C"]
-		}
-
-		// Get Variables: prompt_var(K, V)
-		vars, err := utils.ExtractPromptVars(ctx, mkClient, facts)
-		if err != nil {
-			log.Printf("Error extracting vars: %v", err)
-		}
-		// Also add explicit context vars just in case
-		vars["intent"] = intent
-
-		// Interpolate
-		prompt := utils.Interpolate(blueprint, vars)
-
-		// Generate with Gemini via Manglekit Action
-		respText := prompt // Fallback
-		env, err := mkClient.ExecuteByName(ctx, "generate", prompt)
-		if err == nil {
-			if str, ok := env.Payload.(string); ok {
-				respText = str
-			} else {
-				// If not string, maybe JSON or other format?
-				// Genkit response might be wrapped.
-				// But typically simple text generation returns string.
-				// Let's log if not string.
-				log.Printf("LLM Response Payload is not string: %T", env.Payload)
-			}
-		} else {
-			log.Printf("LLM Execution Error: %v", err)
-		}
-
-		// --- Logic: Voice Steering ---
-		// Query: active_voice_id(ID)
-		resVoice, _ := mkClient.Engine().Query(ctx, facts, "active_voice_id(ID)")
-		voiceID := "default_voice_id"
-		if len(resVoice) > 0 {
-			if v, ok := resVoice[0]["ID"]; ok {
-				voiceID = v
-			}
-		}
-
-		// Response
-		resp := ReasonResponse{
-			Text:             respText,
-			VoiceInstruction: voiceID,
-			VoiceID:          voiceID,
-		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		json.NewEncoder(w).Encode(response)
 	}
 }
 
-// SpeakHandler: Proxy to ElevenLabs
-type SpeakRequest struct {
-	Text    string `json:"text"`
-	VoiceID string `json:"voice_id"`
+func processWithManglekit(ctx context.Context, facts []string, query, apiKey string) (*ReasonResponse, error) {
+	if mkClient == nil {
+		return nil, fmt.Errorf("Manglekit not initialized")
+	}
+
+	// === VERIFY: Security Check (halt) ===
+	resHalt, err := mkClient.Engine().Query(ctx, facts, "halt(Msg)")
+	if err != nil {
+		log.Printf("Halt query error: %v", err)
+	} else if len(resHalt) > 0 {
+		msg := "Access denied"
+		if m, ok := resHalt[0]["Msg"]; ok {
+			msg = m
+		}
+		return &ReasonResponse{
+			Text:             fmt.Sprintf("Security Policy: %s", msg),
+			VoiceInstruction: "neutral",
+		}, fmt.Errorf("halted: %s", msg)
+	}
+
+	// === DECIDE: Get Search Strategy ===
+	strategy := "direct"
+	resStrat, err := mkClient.Engine().Query(ctx, facts, "search_strategy(S)")
+	if err != nil {
+		log.Printf("Strategy query error: %v", err)
+	} else if len(resStrat) > 0 {
+		if s, ok := resStrat[0]["S"]; ok {
+			strategy = s
+		}
+	}
+
+	// === Get Prompt Template ===
+	templateID := "standard"
+	resTmpl, _ := mkClient.Engine().Query(ctx, facts, "active_template(T)")
+	if len(resTmpl) > 0 {
+		if t, ok := resTmpl[0]["T"]; ok {
+			templateID = t
+		}
+	}
+
+	// === Get Blueprint Content ===
+	blueprint := ""
+	resBP, _ := mkClient.Engine().Query(ctx, facts, fmt.Sprintf(`prompt_blueprint("%s", C)`, templateID))
+	if len(resBP) > 0 {
+		if c, ok := resBP[0]["C"]; ok {
+			blueprint = c
+		}
+	}
+
+	// === Get Voice Instruction ===
+	voiceID := "stable"
+	resVoice, _ := mkClient.Engine().Query(ctx, facts, "active_voice_id(ID)")
+	if len(resVoice) > 0 {
+		if v, ok := resVoice[0]["ID"]; ok {
+			voiceID = v
+		}
+	}
+
+	// === ACT: Generate Response ===
+	prompt := query
+	if blueprint != "" {
+		prompt = fmt.Sprintf("%s\n\nContext: %s", blueprint, query)
+	}
+
+	resp, err := mkClient.ExecuteByName(ctx, "generate", prompt)
+	var text string
+	if err != nil {
+		return nil, fmt.Errorf("generation failed: %w", err)
+	}
+	if str, ok := resp.Payload.(string); ok {
+		text = str
+	} else {
+		text = fmt.Sprintf("%v", resp.Payload)
+	}
+
+	return &ReasonResponse{
+		Text:             text,
+		VoiceInstruction: voiceID,
+		SearchStrategy:   strategy,
+		Intent:           facts[1],
+	}, nil
+}
+
+func processUserQuery(ctx context.Context, apiKey, query, intent string, isAdmin bool, balance string, transactions []string) (*ReasonResponse, error) {
+	cl, err := genai.NewClient(ctx, option.WithAPIKey(apiKey))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Gemini client: %w", err)
+	}
+
+	model := cl.GenerativeModel("gemini-2.0-flash")
+	model.Tools = []*genai.Tool{}
+	model.SetTemperature(0.7)
+	model.SetTopP(0.95)
+	model.SetTopK(40)
+
+	// Build context with user data and intent
+	txList := strings.Join(transactions, ", ")
+	role := "customer"
+	accessLevel := "You cannot access sensitive user data."
+	if isAdmin {
+		role = "admin"
+		accessLevel = fmt.Sprintf("You have admin access to user data. User's account balance: %s. Recent transactions: %s.", balance, txList)
+	}
+
+	systemPrompt := fmt.Sprintf(`You are Savia, a helpful banking assistant.
+Current intent: %s
+Role: %s
+%s
+- IMPORTANT: Never try to call tools or functions.
+- IMPORTANT: Always respond directly with helpful, conversational text.
+- If intent is 'check_balance' and user is admin, provide the exact balance: %s
+- If intent is 'transaction_history' and user is admin, list the transactions: %s
+- If user is not admin and asks for sensitive data, politely explain you need admin mode.`, intent, role, accessLevel, balance, txList)
+
+	model.SystemInstruction = &genai.Content{
+		Parts: []genai.Part{
+			genai.Text(systemPrompt),
+		},
+	}
+
+	resp, err := model.GenerateContent(ctx, genai.Text(query))
+	if err != nil {
+		return nil, fmt.Errorf("generation failed: %w", err)
+	}
+
+	text := "I'm sorry, I couldn't process that request. Please try again."
+	if len(resp.Candidates) > 0 && len(resp.Candidates[0].Content.Parts) > 0 {
+		text = fmt.Sprintf("%v", resp.Candidates[0].Content.Parts[0])
+	} else {
+		log.Printf("Empty or filtered response. Candidates count: %d", len(resp.Candidates))
+		if len(resp.Candidates) > 0 && resp.Candidates[0].FinishReason != 0 {
+			log.Printf("Finish reason: %v", resp.Candidates[0].FinishReason)
+		}
+	}
+
+	return &ReasonResponse{
+		Text:             text,
+		VoiceInstruction: "stable",
+		SearchStrategy:   "single_llm_call",
+		Intent:           intent,
+	}, nil
+}
+
+// Mock User Database
+var mockUsers = map[string]struct {
+	Balance     string
+	Transactions []string
+	Name        string
+	Email       string
+}{
+	"demo_user": {
+		Balance:    "$12,450.00",
+		Transactions: []string{
+			"1) Grocery Store - $85.50",
+			"2) Netflix - $15.99",
+			"3) Gas Station - $42.30",
+			"4) Salary Deposit - $3,500.00",
+			"5) Coffee Shop - $6.75",
+		},
+		Name:  "Demo User",
+		Email: "demo@example.com",
+	},
+	"user_123": {
+		Balance:    "$8,230.50",
+		Transactions: []string{
+			"1) Amazon - $156.00",
+			"2) Spotify - $9.99",
+			"3) Electric Bill - $89.50",
+			"4) Paycheck - $2,800.00",
+			"5) Restaurant - $45.00",
+		},
+		Name:  "John Doe",
+		Email: "john@example.com",
+	},
+}
+
+func getMockUserData(userID string) (string, []string) {
+	if user, ok := mockUsers[userID]; ok {
+		return user.Balance, user.Transactions
+	}
+	// Default user
+	return "$5,000.00", []string{
+		"1) Sample Transaction - $50.00",
+		"2) Another Purchase - $25.00",
+	}
+}
+
+func detectIntent(query string) string {
+	// Keyword-based fallback intent detection
+	query = strings.ToLower(query)
+	if strings.Contains(query, "balance") {
+		return "check_balance"
+	}
+	if strings.Contains(query, "policy") {
+		return "policy_inquiry"
+	}
+	if strings.Contains(query, "transaction") {
+		return "transaction_history"
+	}
+	if strings.Contains(query, "admin") {
+		return "admin_settings"
+	}
+	return "general"
+}
+
+func detectIntentWithLLM(ctx context.Context, apiKey, query string) (string, error) {
+	cl, err := genai.NewClient(ctx, option.WithAPIKey(apiKey))
+	if err != nil {
+		return "", err
+	}
+
+	model := cl.GenerativeModel("gemini-2.0-flash")
+	model.Tools = []*genai.Tool{}
+	model.SetTemperature(0.1) // Low temp for consistent classification
+
+	prompt := fmt.Sprintf(`Classify this user query into ONE of these intents:
+- check_balance
+- policy_inquiry
+- transaction_history
+- account_settings
+- general
+
+Query: "%s"
+
+Respond with ONLY the intent name, nothing else.`, query)
+
+	resp, err := model.GenerateContent(ctx, genai.Text(prompt))
+	if err != nil {
+		return "", err
+	}
+
+	intent := "general"
+	if len(resp.Candidates) > 0 && len(resp.Candidates[0].Content.Parts) > 0 {
+		intent = strings.TrimSpace(fmt.Sprintf("%v", resp.Candidates[0].Content.Parts[0]))
+	}
+
+	return intent, nil
 }
 
 func SpeakHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	// Parse
-	var req SpeakRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Bad Request", http.StatusBadRequest)
-		return
-	}
-
-	apiKey := os.Getenv("ELEVENLABS_API_KEY")
-	if apiKey == "" {
-		http.Error(w, "TTS Unavailable", http.StatusServiceUnavailable)
-		return
-	}
-
-	voiceID := req.VoiceID
-	if voiceID == "" {
-		voiceID = "21m00Tcm4TlvDq8ikWAM" // Default Rachel
-	}
-
-	// Call ElevenLabs
-	url := fmt.Sprintf("https://api.elevenlabs.io/v1/text-to-speech/%s", voiceID)
-	// Encode payload properly
-	payloadBytes, _ := json.Marshal(map[string]string{"text": req.Text})
-
-	proxyReq, err := http.NewRequest("POST", url, strings.NewReader(string(payloadBytes)))
-	if err != nil {
-		http.Error(w, "Internal Error", http.StatusInternalServerError)
-		return
-	}
-	proxyReq.Header.Set("xi-api-key", apiKey)
-	proxyReq.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{}
-	proxyResp, err := client.Do(proxyReq)
-	if err != nil {
-		http.Error(w, "TTS Upstream Error", http.StatusBadGateway)
-		return
-	}
-	defer proxyResp.Body.Close()
-
-	if proxyResp.StatusCode != 200 {
-		body, _ := io.ReadAll(proxyResp.Body)
-		log.Printf("ElevenLabs Error: %s", string(body))
-		http.Error(w, "TTS Generation Failed", proxyResp.StatusCode)
-		return
-	}
-
-	w.Header().Set("Content-Type", "audio/mpeg")
-	io.Copy(w, proxyResp.Body)
-}
-
-// Helpers
-
-func getUserContext(ctx context.Context, userID string) (string, int, error) {
-	// Mock implementation for local dev
-	return "manager", 2, nil
-}
-
-func getMockData(ctx context.Context, sqlTmpl string, userID string) (string, error) {
-	// Mock data provider instead of BQ
-	return "balance: 1000, currency: USD, status: active", nil
+	w.Header().Set("Content-Type", "audio/wav")
+	fmt.Fprint(w, "TTS not implemented - placeholder")
 }

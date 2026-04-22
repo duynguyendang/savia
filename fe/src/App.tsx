@@ -1,50 +1,82 @@
-import { SaviaOrb } from './components/orb/SaviaOrb';
-import { ChatInterface } from './components/chat/ChatInterface';
-import { useSaviaBrain } from './hooks/useSaviaBrain';
+import { useState, useRef } from 'react';
+import Sidebar from './components/Sidebar';
+import Header from './components/Header';
+import ChatStream from './components/ChatStream';
+import InputComposer from './components/InputComposer';
+import VoiceModeOverlay from './components/VoiceModeOverlay';
+import Settings from './components/Settings';
+import type { Message } from './types';
+import { api } from './services/api';
+import { speak } from './services/elevenlabs';
 
-function App() {
-  const { state, transcript, lastTraceId, processInput } = useSaviaBrain();
+export default function App() {
+  const [showSettings, setShowSettings] = useState(false);
+  const [isVoiceMode, setIsVoiceMode] = useState(false);
+  const [messages, setMessages] = useState<Message[]>([
+    {
+      id: '1',
+      role: 'assistant',
+      content: 'Hello! I am Savia. Please add your Gemini API key in Settings first, then ask me anything!',
+      timestamp: new Date(),
+    }
+  ]);
+  const [isThinking, setIsThinking] = useState(false);
+  const chatRef = useRef<number>(0);
+
+  const handleSend = async (text: string) => {
+    const userMsg: Message = {
+      id: (++chatRef.current).toString(),
+      role: 'user',
+      content: text,
+      timestamp: new Date(),
+    };
+
+    setMessages(prev => [...prev, userMsg]);
+    setIsThinking(true);
+
+    try {
+      const { data } = await api.post('/v1/reason', {
+        user_id: "demo_user",
+        message: text
+      });
+
+      const assistantMsg: Message = {
+        id: (++chatRef.current).toString(),
+        role: 'assistant',
+        content: data.text,
+        timestamp: new Date(),
+      };
+
+      setMessages(prev => [...prev, assistantMsg]);
+      setIsThinking(false);
+
+      await speak(data.text, data.voice_instruction as "stable" | "expressive");
+    } catch (error) {
+      console.error('Chat error:', error);
+      setIsThinking(false);
+      const errorMsg = error instanceof Error ? error.message : 'Connection failed. Check API key in Settings.';
+      setMessages(prev => [...prev, {
+        id: (++chatRef.current).toString(),
+        role: 'assistant',
+        content: errorMsg,
+        timestamp: new Date(),
+      }]);
+    }
+  };
 
   return (
-    <div className="min-h-screen bg-background text-text flex flex-col font-sans">
-      <header className="p-8 border-b border-white/5 bg-black/20 backdrop-blur-sm">
-        <h1 className="text-4xl font-serif text-center text-accent tracking-[0.2em] mb-2">SAVIA</h1>
-        <div className="text-center text-xs text-gray-500 font-mono tracking-widest uppercase opacity-70">Neuro-Symbolic Intelligence</div>
-      </header>
+    <div className="h-screen w-full flex items-center justify-center p-4 sm:p-8">
+      <div className="w-full max-w-6xl h-full max-h-[800px] glass-panel rounded-[32px] flex overflow-hidden shadow-2xl">
+        <Sidebar onSettingsClick={() => setShowSettings(true)} />
+        <main className="flex-1 flex flex-col relative h-full">
+          <Header title="Savia Assistant" onToggleVoice={() => setIsVoiceMode(true)} />
+          <ChatStream messages={messages} isThinking={isThinking} />
+          <InputComposer onSend={handleSend} disabled={isThinking} onVoiceMode={() => setIsVoiceMode(true)} />
+          <Settings isOpen={showSettings} onClose={() => setShowSettings(false)} />
+        </main>
+      </div>
 
-      <main className="flex-1 flex flex-col items-center justify-start p-4 gap-12 pt-12">
-        <div className="w-full flex justify-center py-8">
-          <SaviaOrb state={state} />
-        </div>
-
-        <div className="w-full px-4">
-          <ChatInterface
-            transcript={transcript}
-            onSend={processInput}
-            disabled={state === 'REASONING' || state === 'SPEAKING'}
-          />
-        </div>
-      </main>
-
-      <footer className="p-4 text-center border-t border-white/5 bg-black/40">
-        <div className="flex justify-between items-center max-w-4xl mx-auto">
-          <div className={`text-xs font-mono transition-colors duration-500 ${state === 'REASONING' ? 'text-purple-400' : 'text-gray-600'}`}>
-            STATUS: <span className="uppercase">{state}</span>
-          </div>
-
-          <div className="text-xs font-mono text-gray-600">
-            TRACE_ID: <span className="text-gray-500">{lastTraceId || "NULL"}</span>
-          </div>
-        </div>
-
-        {state === 'REASONING' && (
-          <div className="mt-2 text-accent text-xs animate-pulse font-mono tracking-widest">
-             // ACCESSING MANGLEKIT KERNEL...
-          </div>
-        )}
-      </footer>
+      <VoiceModeOverlay isOpen={isVoiceMode} onClose={() => setIsVoiceMode(false)} />
     </div>
   );
 }
-
-export default App;

@@ -2,6 +2,7 @@ package tts
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,33 +10,51 @@ import (
 	"os"
 )
 
-// StreamSpeech proxies text-to-speech requests to ElevenLabs securely
-func StreamSpeech(w http.ResponseWriter, text, voiceID string) error {
-	apiKey := os.Getenv("ELEVENLABS_API_KEY") // Injected via Secret Manager
+type GeminiTTSRequest struct {
+	Model  string                 `json:"model"`
+	Input  map[string]string      `json:"input"`
+	Config map[string]interface{} `json:"config,omitempty"`
+}
+
+type GeminiTTSResponse struct {
+	AudioContent string `json:"audioContent"`
+}
+
+func StreamSpeech(w http.ResponseWriter, text, voiceInstruction string) error {
+	apiKey := os.Getenv("GOOGLE_API_KEY")
 	if apiKey == "" {
-		return fmt.Errorf("ELEVENLABS_API_KEY is not set")
+		return fmt.Errorf("GOOGLE_API_KEY is not set")
 	}
 
-	url := fmt.Sprintf("https://api.elevenlabs.io/v1/text-to-speech/%s/stream", voiceID)
-
-	payload, _ := json.Marshal(map[string]interface{}{
-		"text":     text,
-		"model_id": "eleven_turbo_v2", // Optimized for low latency
-		"voice_settings": map[string]float64{
-			"stability":        0.5,
-			"similarity_boost": 0.8,
+	config := map[string]interface{}{
+		"voice": map[string]string{
+			"languageCode": "en-US",
+			"name":         "en-US-Standard-A",
 		},
-	})
+		"audioConfig": map[string]string{
+			"audioEncoding": "MP3",
+		},
+	}
 
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(payload))
+	if voiceInstruction != "" {
+		config["voice"].(map[string]string)["ssmlGender"] = voiceInstruction
+	}
+
+	reqBody := map[string]interface{}{
+		"input":  map[string]string{"text": text},
+		"config": config,
+	}
+
+	payloadBytes, _ := json.Marshal(reqBody)
+
+	url := fmt.Sprintf("https://texttospeech.googleapis.com/v1/text:synthesize?key=%s", apiKey)
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(payloadBytes))
 	if err != nil {
 		return fmt.Errorf("failed to create request: %v", err)
 	}
 
-	req.Header.Set("xi-api-key", apiKey)
 	req.Header.Set("Content-Type", "application/json")
 
-	// Use a client with a timeout for production safety, though default is okay for now
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -48,11 +67,18 @@ func StreamSpeech(w http.ResponseWriter, text, voiceID string) error {
 		return fmt.Errorf("TTS upstream error (status %d): %s", resp.StatusCode, string(body))
 	}
 
-	// Stream the audio back to the client
-	w.Header().Set("Content-Type", "audio/mpeg")
-	if _, err := io.Copy(w, resp.Body); err != nil {
-		return fmt.Errorf("failed to stream response: %v", err)
+	var result GeminiTTSResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("failed to decode response: %v", err)
 	}
+
+	audioBytes, err := base64.StdEncoding.DecodeString(result.AudioContent)
+	if err != nil {
+		return fmt.Errorf("failed to decode audio: %v", err)
+	}
+
+	w.Header().Set("Content-Type", "audio/mpeg")
+	w.Write(audioBytes)
 
 	return nil
 }
