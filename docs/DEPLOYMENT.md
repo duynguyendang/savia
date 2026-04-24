@@ -8,8 +8,52 @@ Savia is a neuro-symbolic AI assistant with two deployment targets:
 
 ---
 
-## Project Structure
+## Architecture (Updated)
 
+### API Communication
+
+```
+Browser (FE) ────► Cloud Run (BE) ────► Gemini API
+                     │
+                     └──► Manglekit Engine (optional, fallback to direct Gemini)
+```
+
+### Authentication
+
+**Backend-managed API key:**
+- API key is set via `GOOGLE_API_KEY` environment variable in Cloud Run
+- No frontend API key handling needed
+- No admin mode toggle (all users have full access)
+
+---
+
+## Deployment Procedures
+
+### Backend (Cloud Run)
+
+**Prerequisites:**
+- `gcloud` CLI authenticated
+- Google Cloud project with Cloud Run API enabled
+
+**Deploy:**
+```bash
+cd savia/be
+gcloud run deploy savia-be \
+  --source . \
+  --region=us-central1 \
+  --allow-unauthenticated
+```
+
+**Set API Key (REQUIRED):**
+```bash
+gcloud run services update savia-be \
+  --region=us-central1 \
+  --set-env-vars="GOOGLE_API_KEY=your-gemini-api-key"
+```
+
+**Get Backend URL:**
+```bash
+gcloud run services describe savia-be --region=us-central1 --format='value(status.url)'
 ```
 savia/
 ├── be/                         # Go Backend (Cloud Run)

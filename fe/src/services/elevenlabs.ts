@@ -1,25 +1,23 @@
-import axios from 'axios';
+export const speak = async (text: string, voiceInstruction: "stable" | "expressive"): Promise<{ url: string; error?: string }> => {
+  try {
+    const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8080';
+    
+    const response = await fetch(`${API_URL}/v1/speak`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, voice_instruction: voiceInstruction })
+    });
 
-export const speak = async (text: string, style: "stable" | "expressive") => {
-    try {
-        const response = await axios.post(
-            '/v1/speak',
-            { text, voice_instruction: style },
-            { responseType: 'arraybuffer' }
-        );
-
-        const audioContext = new window.AudioContext();
-        const audioBuffer = await audioContext.decodeAudioData(response.data);
-        const source = audioContext.createBufferSource();
-        source.buffer = audioBuffer;
-        source.connect(audioContext.destination);
-        source.start(0);
-
-        return new Promise((resolve) => {
-            source.onended = resolve;
-        });
-    } catch (err) {
-        console.error("Voice synthesis failed", err);
-        return Promise.resolve();
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ error: 'TTS failed' }));
+      return { url: '', error: error.error || 'TTS failed' };
     }
+
+    const audioBlob = await response.blob();
+    const url = URL.createObjectURL(audioBlob);
+    return { url };
+  } catch (err: any) {
+    console.error("TTS failed:", err?.message || err);
+    return { url: '', error: err?.message || 'TTS error' };
+  }
 };

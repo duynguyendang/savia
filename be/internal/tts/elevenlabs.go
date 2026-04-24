@@ -2,60 +2,66 @@ package tts
 
 import (
 	"bytes"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"os"
+	"time"
 )
 
-type GeminiTTSRequest struct {
-	Model  string                 `json:"model"`
-	Input  map[string]string      `json:"input"`
-	Config map[string]interface{} `json:"config,omitempty"`
+type ElevenLabsRequest struct {
+	Text             string  `json:"text"`
+	ModelID          string  `json:"model_id"`
+	VoiceSettings    VoiceSettings `json:"voice_settings"`
 }
 
-type GeminiTTSResponse struct {
-	AudioContent string `json:"audioContent"`
+type VoiceSettings struct {
+	Stability        float64 `json:"stability"`
+	SimilarityBoost float64 `json:"similarity_boost"`
+	Style           float64 `json:"style"`
+	UseSpeakerBoost bool    `json:"use_speaker_boost"`
 }
 
-func StreamSpeech(w http.ResponseWriter, text, voiceInstruction string) error {
-	apiKey := os.Getenv("GOOGLE_API_KEY")
+type ElevenLabsResponse struct {
+	AudioBase64 string `json:"audio_base64"`
+}
+
+func StreamSpeech(w http.ResponseWriter, text, voiceInstruction, apiKey string) error {
 	if apiKey == "" {
-		return fmt.Errorf("GOOGLE_API_KEY is not set")
+		return fmt.Errorf("ElevenLabs API key is required")
 	}
 
-	config := map[string]interface{}{
-		"voice": map[string]string{
-			"languageCode": "en-US",
-			"name":         "en-US-Standard-A",
+	voiceID := "EXAVITQu4vr4xnSDxMaL" // Default voice
+	modelID := "eleven_flash_v2_5"
+
+	if voiceInstruction == "expressive" {
+		voiceID = "pFZP5JQG7iQjIQuC4Bku" // Different voice for expressive
+	}
+
+	reqBody := ElevenLabsRequest{
+		Text:    text,
+		ModelID: modelID,
+		VoiceSettings: VoiceSettings{
+			Stability:        0.5,
+			SimilarityBoost:  0.8,
+			Style:           0.0,
+			UseSpeakerBoost:  true,
 		},
-		"audioConfig": map[string]string{
-			"audioEncoding": "MP3",
-		},
-	}
-
-	if voiceInstruction != "" {
-		config["voice"].(map[string]string)["ssmlGender"] = voiceInstruction
-	}
-
-	reqBody := map[string]interface{}{
-		"input":  map[string]string{"text": text},
-		"config": config,
 	}
 
 	payloadBytes, _ := json.Marshal(reqBody)
 
-	url := fmt.Sprintf("https://texttospeech.googleapis.com/v1/text:synthesize?key=%s", apiKey)
+	url := fmt.Sprintf("https://api.elevenlabs.io/v1/text-to-speech/%s", voiceID)
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(payloadBytes))
 	if err != nil {
 		return fmt.Errorf("failed to create request: %v", err)
 	}
 
+	req.Header.Set("Accept", "audio/mpeg")
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("xi-api-key", apiKey)
 
-	client := &http.Client{}
+	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("upstream request failed: %v", err)
@@ -64,21 +70,12 @@ func StreamSpeech(w http.ResponseWriter, text, voiceInstruction string) error {
 
 	if resp.StatusCode != 200 {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("TTS upstream error (status %d): %s", resp.StatusCode, string(body))
+		return fmt.Errorf("ElevenLabs error (status %d): %s", resp.StatusCode, string(body))
 	}
 
-	var result GeminiTTSResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return fmt.Errorf("failed to decode response: %v", err)
-	}
-
-	audioBytes, err := base64.StdEncoding.DecodeString(result.AudioContent)
-	if err != nil {
-		return fmt.Errorf("failed to decode audio: %v", err)
-	}
-
+	// ElevenLabs returns audio directly, not base64
 	w.Header().Set("Content-Type", "audio/mpeg")
-	w.Write(audioBytes)
+	io.Copy(w, resp.Body)
 
 	return nil
 }

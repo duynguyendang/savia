@@ -8,23 +8,6 @@ export const api = axios.create({
 });
 
 api.interceptors.request.use((config) => {
-    const apiKey = localStorage.getItem('gemini_api_key') || '';
-    const isAdmin = localStorage.getItem('admin_mode') === 'true';
-    
-    console.log('API Request:', {
-        url: config.url,
-        hasApiKey: !!apiKey,
-        apiKeyPrefix: apiKey.substring(0, 5),
-        isAdmin: isAdmin
-    });
-    
-    if (apiKey) {
-        config.headers['X-Gemini-Api-Key'] = apiKey;
-    }
-    if (isAdmin) {
-        config.headers['X-Admin-Mode'] = 'true';
-    }
-    
     return config;
 });
 
@@ -34,7 +17,9 @@ api.interceptors.response.use(
         console.error('API Error:', error.response?.status, error.response?.data);
         let msg = 'Connection failed';
         if (error.response?.status === 401) {
-            msg = 'API key not configured. Please add your key in Settings.';
+            msg = 'API key not configured. Please contact administrator.';
+        } else if (error.response?.data?.error) {
+            msg = error.response.data.error;
         } else if (error.response?.data?.message) {
             msg = error.response.data.message;
         } else if (error.message) {

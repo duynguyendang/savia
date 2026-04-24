@@ -16,6 +16,7 @@ import (
 	"github.com/duynguyendang/manglekit/providers/google"
 	"github.com/duynguyendang/manglekit/sdk"
 	"github.com/google/generative-ai-go/genai"
+	"github.com/duynguyendang/savia-be/internal/tts"
 	"google.golang.org/api/option"
 )
 
@@ -117,7 +118,7 @@ func enableCORS(next http.HandlerFunc) http.HandlerFunc {
 			w.Header().Set("Access-Control-Allow-Origin", "*")
 		}
 		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Gemini-Api-Key, X-Admin-Mode, Authorization")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		w.Header().Set("Access-Control-Max-Age", "3600")
 
 		if r.Method == http.MethodOptions {
@@ -163,21 +164,24 @@ func ReasonHandler() http.HandlerFunc {
 			return
 		}
 
-		// Get API key (user-provided or default)
-		apiKey := r.Header.Get("X-Gemini-Api-Key")
-		if apiKey == "" {
-			apiKey = defaultAPIKey
-		}
-
-		if apiKey == "" {
-			http.Error(w, "API key not configured", http.StatusUnauthorized)
+		if defaultAPIKey == "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Server misconfigured: API key not set"})
 			return
 		}
+		apiKey := defaultAPIKey
 
 		ctx := r.Context()
 
-		// Check for admin mode (via header or request body)
-		isAdmin := r.Header.Get("X-Admin-Mode") == "true" || req.Role == "admin"
+		// Validate API key format (basic check)
+		if len(apiKey) < 10 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Invalid API key format."})
+			return
+		}
+
 		userID := req.UserID
 		if userID == "" {
 			userID = "demo_user"
@@ -186,20 +190,22 @@ func ReasonHandler() http.HandlerFunc {
 		// Extract intent using LLM
 		intent, intentErr := detectIntentWithLLM(ctx, apiKey, req.Message)
 		if intentErr != nil {
-			intent = detectIntent(req.Message)
 			log.Printf("LLM intent detection failed: %v", intentErr)
+			intent = detectIntentFallback(req.Message)
 		}
-		log.Printf("Intent: %s, isAdmin: %v, userID: %s", intent, isAdmin, userID)
+		log.Printf("Intent: %s, userID: %s", intent, userID)
 
 		// Get mock user data
 		balance, transactions := getMockUserData(userID)
 
 		// Process with single LLM call (intent + response combined)
-		response, err := processUserQuery(ctx, apiKey, req.Message, intent, isAdmin, balance, transactions)
+		response, err := processUserQuery(ctx, apiKey, req.Message, intent, balance, transactions)
 
 		if err != nil {
 			log.Printf("processUserQuery failed: %v", err)
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
 		}
 
@@ -291,36 +297,60 @@ func processWithManglekit(ctx context.Context, facts []string, query, apiKey str
 	}, nil
 }
 
-func processUserQuery(ctx context.Context, apiKey, query, intent string, isAdmin bool, balance string, transactions []string) (*ReasonResponse, error) {
+func processUserQuery(ctx context.Context, apiKey, query, intent string, balance string, transactions []string) (*ReasonResponse, error) {
 	cl, err := genai.NewClient(ctx, option.WithAPIKey(apiKey))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Gemini client: %w", err)
 	}
 
-	model := cl.GenerativeModel("gemini-2.0-flash")
+	model := cl.GenerativeModel("gemini-3-flash-preview")
 	model.Tools = []*genai.Tool{}
 	model.SetTemperature(0.7)
 	model.SetTopP(0.95)
 	model.SetTopK(40)
 
-	// Build context with user data and intent
+	// Build context with user data
 	txList := strings.Join(transactions, ", ")
-	role := "customer"
-	accessLevel := "You cannot access sensitive user data."
-	if isAdmin {
-		role = "admin"
-		accessLevel = fmt.Sprintf("You have admin access to user data. User's account balance: %s. Recent transactions: %s.", balance, txList)
+	accessLevel := fmt.Sprintf("User's account balance: %s. Recent transactions: %s.", balance, txList)
+
+	// Intent-specific instructions
+	intentInstructions := map[string]string{
+		"check_balance":      "Provide the exact balance if admin. If not admin, explain how to access balance via the app.",
+		"transaction_history": "List recent transactions if admin. If not admin, explain how to view transaction history.",
+		"transfer_money":     "Explain the transfer process, limits, and how to initiate. Ask for recipient details if ready.",
+		"withdraw":          "Explain withdrawal options, limits, and any fees involved.",
+		"account_info":      "Provide general account information based on available data.",
+		"account_settings":  "Guide user through available account settings options.",
+		"security":         "Explain security features and recommend official channels for sensitive issues.",
+		"card_services":     "Explain available card services, activation, and management options.",
+		"loan":             "Provide general information about loan products. Recommend visiting branch for detailed advice.",
+		"investments":      "Explain investment product options and risks. Recommend consulting a financial advisor.",
+		"insurance":        "Explain available insurance products and coverage options.",
+		"support":          "Offer helpful assistance and guide to appropriate resources.",
+		"complaint":        "Acknowledge the complaint empathetically and guide to resolution process.",
+		"feedback":         "Thank user for feedback and explain how it will be used.",
+		"policy_inquiry":   "Explain relevant policies clearly and concisely.",
+		"fraud_security":   "Urge immediate action for suspected fraud. Provide emergency contact information.",
 	}
 
-	systemPrompt := fmt.Sprintf(`You are Savia, a helpful banking assistant.
-Current intent: %s
-Role: %s
-%s
-- IMPORTANT: Never try to call tools or functions.
-- IMPORTANT: Always respond directly with helpful, conversational text.
-- If intent is 'check_balance' and user is admin, provide the exact balance: %s
-- If intent is 'transaction_history' and user is admin, list the transactions: %s
-- If user is not admin and asks for sensitive data, politely explain you need admin mode.`, intent, role, accessLevel, balance, txList)
+	instr := intentInstructions[intent]
+	if instr == "" {
+		instr = "Provide helpful, accurate, and concise information."
+	}
+
+	systemPrompt := fmt.Sprintf(`You are Savia, a professional banking assistant with neuro-symbolic reasoning capabilities.
+
+User Data: %s
+
+Intent: %s
+
+Instructions: %s
+
+Guidelines:
+- Be professional, precise, and sophisticated in tone
+- Provide specific numbers and account details when available
+- Be helpful and comprehensive in responses
+- If unsure, recommend official channels (app, branch, hotline)`, accessLevel, intent, instr)
 
 	model.SystemInstruction = &genai.Content{
 		Parts: []genai.Part{
@@ -343,9 +373,15 @@ Role: %s
 		}
 	}
 
+	voiceInstruction := "stable"
+	switch intent {
+	case "support", "complaint", "feedback", "general":
+		voiceInstruction = "expressive"
+	}
+
 	return &ReasonResponse{
 		Text:             text,
-		VoiceInstruction: "stable",
+		VoiceInstruction: voiceInstruction,
 		SearchStrategy:   "single_llm_call",
 		Intent:           intent,
 	}, nil
@@ -395,22 +431,69 @@ func getMockUserData(userID string) (string, []string) {
 	}
 }
 
-func detectIntent(query string) string {
-	// Keyword-based fallback intent detection
-	query = strings.ToLower(query)
-	if strings.Contains(query, "balance") {
+func detectIntentFallback(query string) string {
+	// Keyword-based intent detection
+	q := strings.ToLower(query)
+
+	// Financial queries
+	if strings.Contains(q, "balance") || strings.Contains(q, "how much") || strings.Contains(q, "total") {
 		return "check_balance"
 	}
-	if strings.Contains(query, "policy") {
-		return "policy_inquiry"
-	}
-	if strings.Contains(query, "transaction") {
+	if strings.Contains(q, "transaction") || strings.Contains(q, "history") || strings.Contains(q, "past") || strings.Contains(q, "record") {
 		return "transaction_history"
 	}
-	if strings.Contains(query, "admin") {
-		return "admin_settings"
+	if strings.Contains(q, "transfer") || strings.Contains(q, "send money") || strings.Contains(q, "pay") {
+		return "transfer_money"
 	}
-	return "general"
+	if strings.Contains(q, "withdraw") || strings.Contains(q, "cash out") {
+		return "withdraw"
+	}
+
+	// Account queries
+	if strings.Contains(q, "profile") || strings.Contains(q, "account info") || strings.Contains(q, "my info") {
+		return "account_info"
+	}
+	if strings.Contains(q, "setting") || strings.Contains(q, "preference") || strings.Contains(q, "option") {
+		return "account_settings"
+	}
+	if strings.Contains(q, "password") || strings.Contains(q, "pin") || strings.Contains(q, "security") {
+		return "security"
+	}
+
+	// Product/service queries
+	if strings.Contains(q, "card") || strings.Contains(q, "debit") || strings.Contains(q, "credit") {
+		return "card_services"
+	}
+	if strings.Contains(q, "loan") || strings.Contains(q, "borrow") {
+		return "loan"
+	}
+	if strings.Contains(q, "invest") || strings.Contains(q, "stock") || strings.Contains(q, "fund") {
+		return "investments"
+	}
+	if strings.Contains(q, "insurance") || strings.Contains(q, "cover") {
+		return "insurance"
+	}
+
+	// Support queries
+	if strings.Contains(q, "help") || strings.Contains(q, "support") || strings.Contains(q, "assist") {
+		return "support"
+	}
+	if strings.Contains(q, "complaint") || strings.Contains(q, "problem") || strings.Contains(q, "issue") {
+		return "complaint"
+	}
+	if strings.Contains(q, "feedback") || strings.Contains(q, "review") || strings.Contains(q, "suggest") {
+		return "feedback"
+	}
+
+	// Policy/safety queries
+	if strings.Contains(q, "policy") || strings.Contains(q, "rule") || strings.Contains(q, "term") {
+		return "policy_inquiry"
+	}
+	if strings.Contains(q, "block") || strings.Contains(q, "freeze") || strings.Contains(q, "fraud") {
+		return "fraud_security"
+	}
+
+return "general"
 }
 
 func detectIntentWithLLM(ctx context.Context, apiKey, query string) (string, error) {
@@ -419,20 +502,44 @@ func detectIntentWithLLM(ctx context.Context, apiKey, query string) (string, err
 		return "", err
 	}
 
-	model := cl.GenerativeModel("gemini-2.0-flash")
+	model := cl.GenerativeModel("gemini-3-flash-preview")
 	model.Tools = []*genai.Tool{}
-	model.SetTemperature(0.1) // Low temp for consistent classification
+	model.SetTemperature(0.1)
 
-	prompt := fmt.Sprintf(`Classify this user query into ONE of these intents:
+	prompt := fmt.Sprintf(`You are an intent classifier for a banking assistant. Classify the user query into ONE of these intents:
+
+Financial:
 - check_balance
-- policy_inquiry
 - transaction_history
+- transfer_money
+- withdraw
+
+Account:
+- account_info
 - account_settings
-- general
+- security
+
+Products:
+- card_services
+- loan
+- investments
+- insurance
+
+Support:
+- support
+- complaint
+- feedback
+
+Safety:
+- policy_inquiry
+- fraud_security
+
+General:
+- general (anything that doesn't fit above)
 
 Query: "%s"
 
-Respond with ONLY the intent name, nothing else.`, query)
+Respond with ONLY the intent name in lowercase. Example: check_balance`, query)
 
 	resp, err := model.GenerateContent(ctx, genai.Text(prompt))
 	if err != nil {
@@ -441,13 +548,36 @@ Respond with ONLY the intent name, nothing else.`, query)
 
 	intent := "general"
 	if len(resp.Candidates) > 0 && len(resp.Candidates[0].Content.Parts) > 0 {
-		intent = strings.TrimSpace(fmt.Sprintf("%v", resp.Candidates[0].Content.Parts[0]))
+		intent = strings.TrimSpace(strings.ToLower(fmt.Sprintf("%v", resp.Candidates[0].Content.Parts[0])))
 	}
 
 	return intent, nil
 }
 
 func SpeakHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "audio/wav")
-	fmt.Fprint(w, "TTS not implemented - placeholder")
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if defaultAPIKey == "" {
+		http.Error(w, "Server misconfigured: API key not set", http.StatusInternalServerError)
+		return
+	}
+
+	var req struct {
+		Text             string `json:"text"`
+		VoiceInstruction string `json:"voice_instruction"`
+		Model            string `json:"model"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if err := tts.StreamGeminiSpeech(w, req.Text, req.VoiceInstruction, defaultAPIKey); err != nil {
+		log.Printf("TTS error: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 }

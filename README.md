@@ -8,7 +8,7 @@ Unlike traditional chatbots that rely solely on probabilistic LLMs, Savia utiliz
 
 ## 1. The Core Philosophy: "Lifeblood of Logic"
 
-In Savia, the LLM (Gemini) acts as the creative brain, while the Manglekit Reasoning Engine acts as the **Savia (Sap)**—the essential lifeblood that carries nutrients (facts) and enforces structure (logic). Every word spoken by Savia through **ElevenLabs** is first audited by the Logic Engine to ensure it is deep, accurate, and safe.
+In Savia, the LLM (Gemini) acts as the creative brain, while the Manglekit Reasoning Engine acts as the **Savia (Sap)**—the essential lifeblood that carries nutrients (facts) and enforces structure (logic). Every word spoken by Savia through **Gemini 3.1 Flash TTS** is first audited by the Logic Engine to ensure it is deep, accurate, and safe.
 
 ---
 
@@ -16,7 +16,7 @@ In Savia, the LLM (Gemini) acts as the creative brain, while the Manglekit Reaso
 
 * **Two-Way Voice Communication:** Full duplex voice interaction using Web Speech API (STT) and Gemini 3.1 Flash TTS. Users speak and Savia responds with natural voice.
 * **Anti-Hallucination Guardrails:** Every response is cross-referenced against a **BigQuery** "Source of Truth" using Datalog reflection before it reaches the user.
-* **Deterministic RBAC:** User permissions and roles are fetched dynamically from BigQuery and enforced via formal logic—not just system prompts.
+* **Deterministic Access Control:** User permissions and roles are enforced via formal logic—not just system prompts.
 * **Sophisticated Feedback Loops:** If a response is too shallow or misses a technical detail, the Reasoning Engine triggers a "Self-Correction" loop, forcing the LLM to rewrite the answer.
 * **High-Fidelity Voice:** Integrated with **Gemini 3.1 Flash TTS** with SynthID watermarking for audio authenticity.
 * **Logical Observability:** Fully integrated with **Datadog** via OpenTelemetry. You can see exactly which **Datalog Rule** allowed or blocked an AI's action.
@@ -65,17 +65,17 @@ In Savia, the LLM (Gemini) acts as the creative brain, while the Manglekit Reaso
 | Direction | Technology | Description |
 |-----------|------------|-------------|
 | **User → Savia** | Web Speech API | Browser microphone captures voice, transcribes to text |
-| **Savia → User** | Gemini 3.1 Flash TTS | Server proxies TTS audio stream to browser |
+| **Savia → User** | Gemini 3.1 Flash TTS | Backend generates and streams TTS audio to browser |
 
 ### Component Flow
 
 | Stage | Component | Description |
 |-------|-----------|-------------|
 | **1. Listen** | `useSpeechRecognition` | Browser Web Speech API captures and transcribes user voice |
-| **2. Assess** | `main.go:ReasonHandler` | Parses intent, fetches RBAC from BigQuery, queries `halt/1` |
-| **3. Execute** | `Manglekit Engine` | Routes to SQL or vector search via `search_strategy/1` |
-| **4. Reflect** | `rules.dl` | Validates LLM response against `bq_result/1` facts |
-| **5. Speak** | `tts.StreamSpeech` | Gemini TTS generates audio, streamed to browser |
+| **2. Assess** | `main.go:ReasonHandler` | Parses intent using Gemini, queries `halt/1` |
+| **3. Execute** | `Manglekit Engine` | Routes to appropriate action via `search_strategy/1` |
+| **4. Reflect** | `rules.dl` | Validates LLM response against facts |
+| **5. Speak** | `tts.StreamGeminiSpeech` | Gemini 3.1 Flash TTS generates audio, streamed to browser |
 
 Savia is built as a **Monorepo** consisting of:
 
@@ -87,8 +87,8 @@ Savia is built as a **Monorepo** consisting of:
 
 ## 4. Tech Stack
 
-* **Logic Engine:** [Manglekit](https://www.google.com/search?q=https://github.com/duynguyendang/manglekit) (Go + Google Mangle)
-* **Intelligence:** Google Gemini 3 Flash (Vertex AI)
+* **Logic Engine:** [Manglekit](https://github.com/duynguyendang/manglekit) (Go + Google Mangle)
+* **Intelligence:** Google Gemini 3 Flash Preview (Text Generation)
 * **Voice:** Google Gemini 3.1 Flash TTS (SynthID watermarked)
 * **Data Warehouse:** Google Cloud BigQuery
 * **Infrastructure:** Google Cloud Run (Serverless BE), Firebase Hosting (FE)
@@ -106,7 +106,7 @@ savia/
 │   ├── resources/      # policy.dl (Logic Rules)
 │   └── Dockerfile      # Cloud Run deployment
 ├── fe/                 # React Frontend (Savia-FE)
-│   ├── src/            # ElevenLabs SDK integration
+│   ├── src/            # API integration
 │   └── public/
 └── README.md
 
@@ -121,7 +121,6 @@ savia/
 * Go 1.21+
 * Node.js & npm
 * Google Cloud Project (with BigQuery & Vertex AI enabled)
-* ElevenLabs API Key
 
 ### Backend Setup
 
@@ -130,10 +129,7 @@ savia/
 3. Set environment variables:
 ```bash
 export GOOGLE_API_KEY="your-gemini-key"
-export ELEVENLABS_API_KEY="your-key"
-
 ```
-
 
 4. Run the service: `go run cmd/main.go`
 
@@ -165,14 +161,12 @@ cd fe && npm run build && firebase deploy --project=savia-demo
 
 ---
 
-## 8. Demo Scenario: The Sophisticated Wealth Advisor
+## 8. Demo Scenario: The Sophisticated Assistant
 
-1. **User:** "Can I withdraw $50,000 from my account today?"
+1. **User:** "Can you explain how machine learning works?"
 2. **Savia Logic:**
-* **Assess:** Queries BigQuery RBAC. User is "Gold Tier" -> Allowed.
-* **Execute:** Queries BigQuery Balance -> Balance is $60,000.
-* **Reflect:** Logic Engine detects that $50k is > 80% of total balance.
-* **Steer:** Triggers a "Sophisticated Warning" feedback to Gemini.
+   * **Assess:** Parses intent as "general_query" -> Allowed.
+   * **Execute:** Generates comprehensive response using Gemini 3 Flash.
+   * **Reflect:** Logic Engine validates response accuracy against facts.
 
-
-3. **Result:** Savia responds (via ElevenLabs) with a professional, concerned tone: *"You have sufficient funds, but withdrawing 80% of your liquidity might impact your planned investment strategy. Would you like to review the implications first?"*
+3. **Result:** Savia responds (via Gemini TTS) with a professional, detailed explanation: *"Machine learning is a subset of artificial intelligence that enables systems to learn and improve from experience without being explicitly programmed..."*

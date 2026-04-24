@@ -1,23 +1,96 @@
 import { motion } from 'motion/react';
-import { Play, Download, Copy, RefreshCw, ThumbsDown } from 'lucide-react';
+import { Play, Download, Copy, RefreshCw, ThumbsDown, Pause } from 'lucide-react';
 import type { Message } from '../types';
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
+
+interface MessageWithAudio extends Message {
+  audioUrl?: string;
+  audioError?: string;
+}
 
 interface ChatStreamProps {
-  messages: Message[];
+  messages: MessageWithAudio[];
   isThinking: boolean;
 }
 
 export default function ChatStream({ messages, isThinking }: ChatStreamProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
+  const [playingId, setPlayingId] = useState<string | null>(null);
+  const synthRef = useRef<SpeechSynthesis | null>(window.speechSynthesis);
+  const currentAudioRef = useRef<HTMLAudioElement | null>(null);
+  const [audioDuration, setAudioDuration] = useState<Record<string, number>>({});
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isThinking]);
 
+  useEffect(() => {
+    return () => {
+      synthRef.current?.cancel();
+    };
+  }, []);
+
+  const handlePlayVoice = (msg: Message) => {
+    if (playingId === msg.id) {
+      synthRef.current?.cancel();
+      setPlayingId(null);
+      return;
+    }
+
+    synthRef.current?.cancel();
+    const utterance = new SpeechSynthesisUtterance(msg.content);
+
+    const voices = synthRef.current?.getVoices() || [];
+    const preferredVoice = voices.find(v => v.name.includes('Google') || v.name.includes('Enhanced') || v.lang === 'en-US');
+    if (preferredVoice) utterance.voice = preferredVoice;
+
+    utterance.pitch = 1.1;
+    utterance.rate = 1.0;
+
+    utterance.onend = () => setPlayingId(null);
+    utterance.onerror = () => setPlayingId(null);
+
+    setPlayingId(msg.id);
+    synthRef.current?.speak(utterance);
+  };
+
+  const playAudio = (audioUrl: string, messageId: string) => {
+    if (currentAudioRef.current) {
+      currentAudioRef.current.pause();
+      currentAudioRef.current = null;
+    }
+
+    const audio = new Audio(audioUrl);
+    audio.onended = () => {
+      setPlayingId(null);
+      currentAudioRef.current = null;
+    };
+    audio.onloadedmetadata = () => {
+      setAudioDuration(prev => ({ ...prev, [messageId]: Math.round(audio.duration) }));
+    };
+    audio.play();
+    currentAudioRef.current = audio;
+    setPlayingId(messageId);
+  };
+
+  const togglePlay = (audioUrl: string, messageId: string) => {
+    if (playingId === messageId && currentAudioRef.current) {
+      currentAudioRef.current.pause();
+      setPlayingId(null);
+    } else {
+      playAudio(audioUrl, messageId);
+    }
+  };
+
+  const formatDuration = (seconds: number) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  };
+
   return (
-    <div className="flex-1 overflow-y-auto p-4 sm:p-6 md:p-10 scroll-smooth">
-      <div className="max-w-3xl mx-auto flex flex-col gap-8">
+    <div className="flex-1 overflow-y-auto p-3 sm:p-4 md:p-6 scroll-smooth">
+      <div className="max-w-3xl mx-auto flex flex-col gap-6 sm:gap-8">
         <div className="flex items-center justify-center my-4">
           <span className="text-xs font-medium text-text-dim bg-white/5 px-3 py-1 rounded-full border border-glass-border">
             Today, {new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
@@ -40,7 +113,7 @@ export default function ChatStream({ messages, isThinking }: ChatStreamProps) {
               </div>
             )}
 
-            <div className={`flex flex-col gap-2 ${msg.role === 'user' ? 'items-end max-w-[85%] sm:max-w-[75%]' : 'max-w-[90%] sm:max-w-[85%]'}`}>
+            <div className={`flex flex-col gap-2 ${msg.role === 'user' ? 'items-end max-w-[90%] sm:max-w-[75%]' : 'max-w-[95%] sm:max-w-[85%]'}`}>
               {msg.role === 'assistant' && (
                 <div className="flex items-center gap-2">
                   <span className="text-sm font-bold text-white">Savia</span>
@@ -52,33 +125,52 @@ export default function ChatStream({ messages, isThinking }: ChatStreamProps) {
                 <p className="text-sm sm:text-base leading-relaxed">{msg.content}</p>
               </div>
 
-              {msg.role === 'assistant' && (
+              {msg.role === 'assistant' && msg.audioUrl && (
                 <>
-                  <div className="mt-2 p-3 bg-white/5 rounded-xl border border-glass-border flex items-center gap-4 w-full sm:w-fit min-w-[320px] shadow-sm">
-                    <button className="h-10 w-10 rounded-full bg-accent flex items-center justify-center text-background-dark transition-all shadow-lg shadow-accent/20 flex-shrink-0">
-                      <Play size={24} fill="currentColor" />
+                  <div className={`mt-2 p-3 rounded-xl border flex items-center gap-3 w-full sm:w-fit min-w-0 sm:min-w-[280px] md:min-w-[320px] transition-all duration-500 shadow-sm ${playingId === msg.id ? 'bg-accent/10 border-accent/50 ring-1 ring-accent/30' : 'bg-white/5 border-glass-border'}`}>
+                    <button
+                      onClick={() => togglePlay(msg.audioUrl!, msg.id)}
+                      className={`h-9 w-9 sm:h-10 sm:w-10 rounded-full flex items-center justify-center transition-all shadow-lg flex-shrink-0 ${playingId === msg.id ? 'bg-white text-background-dark scale-110' : 'bg-accent text-background-dark'}`}
+                    >
+                      {playingId === msg.id ? <Pause size={20} fill="currentColor" /> : <Play size={22} fill="currentColor" className="ml-1" />}
                     </button>
                     <div className="flex-1 flex flex-col justify-center gap-1">
-                      <div className="flex items-center justify-between text-[10px] font-bold text-text-dim uppercase tracking-wider mb-1">
-                        <span>High-Fidelity Voice</span>
-                        <span>00:42</span>
+                      <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider mb-1">
+                        <span className={playingId === msg.id ? 'text-accent' : 'text-text-dim'}>High-Fidelity Voice</span>
+                        <span className="text-text-dim font-mono">{audioDuration[msg.id] ? formatDuration(audioDuration[msg.id]) : '00:00'}</span>
                       </div>
-                      <div className="h-6 flex items-center gap-[2px] opacity-80">
+                      <div className="h-6 flex items-center gap-[2px]">
                         {[2, 3, 5, 3, 4, 6, 3, 2, 4, 2, 3, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2].map((h, i) => (
-                          <div
+                          <motion.div
                             key={i}
                             className="waveform-bar"
-                            style={{
+                            animate={playingId === msg.id ? {
+                              height: [`${h * 2}px`, `${h * 4}px`, `${h * 2}px`],
+                              opacity: [0.4, 1, 0.4]
+                            } : {
                               height: `${h * 4}px`,
                               opacity: i > 5 ? 0.3 : 1
+                            }}
+                            transition={playingId === msg.id ? {
+                              repeat: Infinity,
+                              duration: 0.5 + Math.random() * 0.5,
+                              delay: i * 0.05
+                            } : {}}
+                            style={{
+                              width: '3px',
+                              backgroundColor: playingId === msg.id ? '#a5f3fc' : 'rgba(255, 255, 255, 0.4)'
                             }}
                           />
                         ))}
                       </div>
                     </div>
-                    <button className="text-text-dim hover:text-white transition-colors">
-                      <Download size={20} />
-                    </button>
+                    <a
+                      href={msg.audioUrl}
+                      download="savia-response.mp3"
+                      className="text-text-dim hover:text-white transition-colors p-1 rounded-md hover:bg-white/5"
+                    >
+                      <Download size={18} />
+                    </a>
                   </div>
 
                   <div className="flex items-center gap-2 mt-1">
@@ -93,6 +185,40 @@ export default function ChatStream({ messages, isThinking }: ChatStreamProps) {
                     </button>
                   </div>
                 </>
+              )}
+
+              {msg.role === 'assistant' && !msg.audioUrl && (
+                <div className="mt-2 p-3 rounded-xl border border-glass-border flex items-center gap-4 w-full sm:w-fit min-w-[320px] shadow-sm opacity-50">
+                  <button
+                    onClick={() => handlePlayVoice(msg)}
+                    className="h-10 w-10 rounded-full bg-white/10 flex items-center justify-center text-white transition-all shadow-lg flex-shrink-0 hover:bg-white/20"
+                  >
+                    {playingId === msg.id ? <Pause size={20} fill="currentColor" /> : <Play size={22} fill="currentColor" className="ml-1" />}
+                  </button>
+                  <div className="flex-1 flex flex-col justify-center gap-1">
+                    <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider mb-1">
+                      <span className={msg.audioError ? 'text-red-400' : 'text-text-dim'}>{msg.audioError ? 'Voice Error' : 'Web Speech'}</span>
+                      <span className="text-text-dim font-mono">--:--</span>
+                    </div>
+                    <div className="h-6 flex items-center gap-[2px]">
+                      {[2, 3, 5, 3, 4, 6, 3, 2, 4, 2, 3, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2].map((h, i) => (
+                        <div
+                          key={i}
+                          className="waveform-bar"
+                          style={{
+                            width: '3px',
+                            height: `${h * 4}px`,
+                            backgroundColor: 'rgba(255, 255, 255, 0.4)',
+                            opacity: i > 5 ? 0.3 : 1
+                          }}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                  {msg.audioError && (
+                    <p className="text-[10px] text-red-400 truncate max-w-[100px]">{msg.audioError}</p>
+                  )}
+                </div>
               )}
             </div>
 
